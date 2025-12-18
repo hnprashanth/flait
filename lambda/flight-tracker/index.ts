@@ -121,87 +121,153 @@ function extractFlightFields(flightData: FlightAwareResponse): Record<string, an
 }
 
 /**
- * Lambda handler
+ * Extracts flight request from either API Gateway event or direct Lambda invocation
+ */
+function extractFlightRequest(event: any): FlightRequest | null {
+  // Check if this is an API Gateway event
+  if (event.httpMethod || event.requestContext) {
+    const apiEvent = event as APIGatewayProxyEvent;
+    if (apiEvent.body) {
+      try {
+        return JSON.parse(apiEvent.body);
+      } catch (e) {
+        return null;
+      }
+    } else if (apiEvent.queryStringParameters) {
+      return {
+        flight_number: apiEvent.queryStringParameters.flight_number || '',
+        date: apiEvent.queryStringParameters.date || '',
+      };
+    }
+    return null;
+  }
+  
+  // Direct Lambda invocation (from EventBridge Scheduler)
+  if (event.flight_number && event.date) {
+    return {
+      flight_number: event.flight_number,
+      date: event.date,
+    };
+  }
+  
+  return null;
+}
+
+/**
+ * Lambda handler - supports both API Gateway and direct invocations
  */
 export const handler = async (
-  event: APIGatewayProxyEvent
-): Promise<APIGatewayProxyResult> => {
+  event: any
+): Promise<APIGatewayProxyResult | void> => {
+  const isApiGatewayEvent = !!(event.httpMethod || event.requestContext);
+  
   try {
-    // Parse request body
-    let body: FlightRequest;
+    // Extract flight request from event
+    const body = extractFlightRequest(event);
     
-    if (event.body) {
-      body = JSON.parse(event.body);
-    } else {
-      // Support query parameters as fallback
-      body = {
-        flight_number: event.queryStringParameters?.flight_number || '',
-        date: event.queryStringParameters?.date || '',
-      };
+    if (!body) {
+      if (isApiGatewayEvent) {
+        return {
+          statusCode: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+          body: JSON.stringify({
+            error: 'Missing required parameters: flight_number and date are required',
+          }),
+        };
+      } else {
+        console.error('Missing required parameters: flight_number and date are required');
+        return;
+      }
     }
 
     // Validate input
     if (!body.flight_number || !body.date) {
-      return {
-        statusCode: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
-        body: JSON.stringify({
-          error: 'Missing required parameters: flight_number and date are required',
-        }),
-      };
+      if (isApiGatewayEvent) {
+        return {
+          statusCode: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+          body: JSON.stringify({
+            error: 'Missing required parameters: flight_number and date are required',
+          }),
+        };
+      } else {
+        console.error('Missing required parameters: flight_number and date are required');
+        return;
+      }
     }
 
     // Validate date format (YYYY-MM-DD)
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     if (!dateRegex.test(body.date)) {
+      if (isApiGatewayEvent) {
+        return {
+          statusCode: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+          body: JSON.stringify({
+            error: 'Invalid date format. Expected YYYY-MM-DD',
+          }),
+        };
+      } else {
+        console.error('Invalid date format. Expected YYYY-MM-DD');
+        return;
+      }
+    }
+
+    // Fetch flight information from FlightAware
+    console.log(`Fetching flight info for ${body.flight_number} on ${body.date}`);
+    const flightData = await fetchFlightInfo(body.flight_number, body.date);
+
+    // Store in DynamoDB
+    await storeFlightData(body.flight_number, body.date, flightData);
+    console.log(`Successfully stored flight data for ${body.flight_number} on ${body.date}`);
+
+    // Return response based on invocation type
+    if (isApiGatewayEvent) {
       return {
-        statusCode: 400,
+        statusCode: 200,
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
         },
         body: JSON.stringify({
-          error: 'Invalid date format. Expected YYYY-MM-DD',
+          message: 'Flight data stored successfully',
+          flight_number: body.flight_number,
+          date: body.date,
+          data: flightData,
         }),
       };
+    } else {
+      // Direct invocation - no response needed, just log success
+      console.log('Flight tracking completed successfully');
     }
-
-    // Fetch flight information from FlightAware
-    const flightData = await fetchFlightInfo(body.flight_number, body.date);
-
-    // Store in DynamoDB
-    await storeFlightData(body.flight_number, body.date, flightData);
-
-    return {
-      statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
-      body: JSON.stringify({
-        message: 'Flight data stored successfully',
-        flight_number: body.flight_number,
-        date: body.date,
-        data: flightData,
-      }),
-    };
   } catch (error) {
     console.error('Error processing flight data:', error);
     
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
-      body: JSON.stringify({
-        error: 'Internal server error',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      }),
-    };
+    if (isApiGatewayEvent) {
+      return {
+        statusCode: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        },
+        body: JSON.stringify({
+          error: 'Internal server error',
+          message: error instanceof Error ? error.message : 'Unknown error',
+        }),
+      };
+    } else {
+      // Direct invocation - log error and rethrow for EventBridge to handle
+      throw error;
+    }
   }
 };
 

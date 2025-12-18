@@ -71,13 +71,17 @@ async function testLambda() {
   try {
     const result = await handler(event);
     
-    console.log('Response Status:', result.statusCode);
-    console.log('Response Body:', result.body);
-    
-    if (result.statusCode === 200) {
-      console.log('\n✅ Success! Flight data has been stored in DynamoDB.');
+    if (result) {
+      console.log('Response Status:', result.statusCode);
+      console.log('Response Body:', result.body);
+      
+      if (result.statusCode === 200) {
+        console.log('\n✅ Success! Flight data has been stored in DynamoDB.');
+      } else {
+        console.log('\n❌ Error occurred. Check the response above.');
+      }
     } else {
-      console.log('\n❌ Error occurred. Check the response above.');
+      console.log('\n✅ Success! Flight data has been stored in DynamoDB.');
     }
   } catch (error) {
     console.error('❌ Error invoking Lambda:', error);

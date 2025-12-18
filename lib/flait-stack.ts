@@ -3,6 +3,7 @@ import { Construct } from 'constructs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as path from 'path';
 
@@ -46,6 +47,54 @@ export class FlaitStack extends cdk.Stack {
     // Grant Lambda permissions to write to DynamoDB
     flightTable.grantWriteData(flightTrackerFunction);
 
+    // Create IAM role for EventBridge Scheduler to invoke flight-tracker Lambda
+    const schedulerRole = new iam.Role(this, 'SchedulerInvokeRole', {
+      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
+      description: 'Role for EventBridge Scheduler to invoke flight-tracker Lambda',
+    });
+    flightTrackerFunction.grantInvoke(schedulerRole);
+
+    // Create Lambda function for scheduling flight tracking
+    const scheduleFlightTrackerFunction = new NodejsFunction(this, 'ScheduleFlightTrackerFunction', {
+      functionName: 'schedule-flight-tracker',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.join(__dirname, '../lambda/schedule-flight-tracker/index.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(60),
+      environment: {
+        FLIGHTAWARE_API_KEY: process.env.FLIGHTAWARE_API_KEY || '',
+        FLIGHT_TRACKER_FUNCTION_ARN: flightTrackerFunction.functionArn,
+        SCHEDULER_ROLE_ARN: schedulerRole.roleArn,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk'],
+        minify: true,
+      },
+    });
+
+    // Grant schedule-flight-tracker Lambda permissions to create EventBridge schedules
+    scheduleFlightTrackerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'scheduler:CreateSchedule',
+          'scheduler:DeleteSchedule',
+          'scheduler:GetSchedule',
+          'scheduler:UpdateSchedule',
+        ],
+        resources: ['*'], // EventBridge Scheduler doesn't support resource-level permissions yet
+      })
+    );
+
+    // Grant permission to pass the scheduler role to EventBridge Scheduler
+    scheduleFlightTrackerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:PassRole'],
+        resources: [schedulerRole.roleArn],
+      })
+    );
+
     // Create API Gateway REST API
     const api = new apigateway.RestApi(this, 'FlightTrackerApi', {
       restApiName: 'Flight Tracker API',
@@ -68,6 +117,16 @@ export class FlaitStack extends cdk.Stack {
 
     // Add GET endpoint (for query parameters)
     flightsResource.addMethod('GET', flightTrackerIntegration);
+
+    // Create Lambda integration for schedule-flight-tracker
+    const scheduleFlightTrackerIntegration = new apigateway.LambdaIntegration(scheduleFlightTrackerFunction, {
+      requestTemplates: { 'application/json': '{ "statusCode": "200" }' },
+    });
+
+    // Add POST endpoint for scheduling flight tracking
+    const scheduleResource = api.root.addResource('schedule');
+    scheduleResource.addMethod('POST', scheduleFlightTrackerIntegration);
+    scheduleResource.addMethod('GET', scheduleFlightTrackerIntegration);
 
     // Output the API endpoint
     new cdk.CfnOutput(this, 'ApiEndpoint', {

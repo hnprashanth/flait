@@ -25,6 +25,7 @@
     "aws-cdk-lib": "2.232.1",
     "constructs": "^10.0.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/lib-dynamodb": "^3.0.0"
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-scheduler": "^3.0.0"
   }
 }
