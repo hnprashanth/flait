@@ -4,6 +4,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as events from 'aws-cdk-lib/aws-events';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as path from 'path';
 
@@ -27,6 +28,11 @@ export class FlaitStack extends cdk.Stack {
       sortKey: { name: 'date', type: dynamodb.AttributeType.STRING },
     });
 
+    // Create Event Bus for flight events
+    const flightBus = new events.EventBus(this, 'FlightTrackerBus', {
+      eventBusName: 'flight-tracker-bus',
+    });
+
     // Create Lambda function
     const flightTrackerFunction = new NodejsFunction(this, 'FlightTrackerFunction', {
       functionName: 'flight-tracker',
@@ -37,6 +43,7 @@ export class FlaitStack extends cdk.Stack {
       environment: {
         TABLE_NAME: flightTable.tableName,
         FLIGHTAWARE_API_KEY: process.env.FLIGHTAWARE_API_KEY || '',
+        EVENT_BUS_NAME: flightBus.eventBusName,
       },
       bundling: {
         externalModules: ['@aws-sdk'],
@@ -44,8 +51,11 @@ export class FlaitStack extends cdk.Stack {
       },
     });
 
-    // Grant Lambda permissions to write to DynamoDB
-    flightTable.grantWriteData(flightTrackerFunction);
+    // Grant Lambda permissions to read and write to DynamoDB
+    flightTable.grantReadWriteData(flightTrackerFunction);
+
+    // Grant Lambda permissions to put events to EventBridge
+    flightBus.grantPutEventsTo(flightTrackerFunction);
 
     // Create IAM role for EventBridge Scheduler to invoke flight-tracker Lambda
     const schedulerRole = new iam.Role(this, 'SchedulerInvokeRole', {
