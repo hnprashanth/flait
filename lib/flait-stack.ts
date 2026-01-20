@@ -5,6 +5,8 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as path from 'path';
 
@@ -148,6 +150,117 @@ export class FlaitStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'TableName', {
       value: flightTable.tableName,
       description: 'DynamoDB table name',
+    });
+
+    // --- User & Subscription Features ---
+
+    // 1. Create App Data Table (Users & Subscriptions)
+    const appTable = new dynamodb.Table(this, 'AppDataTable', {
+      tableName: 'flait-app-data',
+      partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // Change to RETAIN for production
+    });
+
+    // GSI for finding subscribers by flight
+    appTable.addGlobalSecondaryIndex({
+      indexName: 'flight-subscribers-index',
+      partitionKey: { name: 'GSI1PK', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'GSI1SK', type: dynamodb.AttributeType.STRING },
+    });
+
+    // 2. User Service Lambda
+    const userService = new NodejsFunction(this, 'UserService', {
+      functionName: 'user-service',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.join(__dirname, '../lambda/user-service/index.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(10),
+      environment: {
+        APP_TABLE_NAME: appTable.tableName,
+      },
+      bundling: {
+        minify: true,
+      },
+    });
+
+    appTable.grantReadWriteData(userService);
+
+    // 3. Subscription Service Lambda
+    const subscriptionService = new NodejsFunction(this, 'SubscriptionService', {
+      functionName: 'subscription-service',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.join(__dirname, '../lambda/subscription-service/index.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(29),
+      environment: {
+        APP_TABLE_NAME: appTable.tableName,
+        FLIGHT_TABLE_NAME: flightTable.tableName,
+        FLIGHT_TRACKER_FUNCTION_NAME: flightTrackerFunction.functionName,
+        SCHEDULE_TRACKER_FUNCTION_NAME: scheduleFlightTrackerFunction.functionName,
+      },
+      bundling: {
+        minify: true,
+      },
+    });
+
+    // Permissions for Subscription Service
+    appTable.grantReadWriteData(subscriptionService);
+    flightTable.grantReadData(subscriptionService);
+    flightTrackerFunction.grantInvoke(subscriptionService);
+    scheduleFlightTrackerFunction.grantInvoke(subscriptionService);
+
+    // 4. API Gateway Routes for Users
+    const usersResource = api.root.addResource('users');
+    const userIntegration = new apigateway.LambdaIntegration(userService);
+    usersResource.addMethod('POST', userIntegration);
+    usersResource.addMethod('GET', userIntegration);
+
+    // 5. API Gateway Routes for Subscriptions
+    const subscriptionsResource = api.root.addResource('subscriptions');
+    const subscriptionIntegration = new apigateway.LambdaIntegration(subscriptionService);
+    subscriptionsResource.addMethod('POST', subscriptionIntegration);
+    subscriptionsResource.addMethod('GET', subscriptionIntegration);
+
+    // --- Notification System ---
+
+    // 1. Dead Letter Queue for failed notifications
+    const dlq = new sqs.Queue(this, 'NotificationDLQ', {
+      queueName: 'notification-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+    });
+
+    // 2. Notification Dispatcher Lambda
+    const notificationDispatcher = new NodejsFunction(this, 'NotificationDispatcher', {
+      functionName: 'notification-dispatcher',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.join(__dirname, '../lambda/notification-dispatcher/index.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(60),
+      deadLetterQueue: dlq,
+      environment: {
+        APP_TABLE_NAME: appTable.tableName,
+        TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID || '',
+        TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN || '',
+        TWILIO_FROM_NUMBER: process.env.TWILIO_FROM_NUMBER || '',
+      },
+      bundling: {
+        minify: true,
+      },
+    });
+
+    // Grant permissions
+    appTable.grantReadData(notificationDispatcher);
+
+    // 3. EventBridge Rule
+    new events.Rule(this, 'FlightStatusRule', {
+      eventBus: flightBus,
+      eventPattern: {
+        source: ['com.flait.flight-tracker'],
+        detailType: ['FlightStatusChanged'],
+      },
+      targets: [new targets.LambdaFunction(notificationDispatcher)],
     });
   }
 }

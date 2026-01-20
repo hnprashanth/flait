@@ -243,9 +243,17 @@ export const handler = async (
     // Parse request body
     let body: FlightRequest;
     
-    if (event.body) {
+    // Check if this is a direct invocation (event has flight_number directly)
+    if ((event as any).flight_number) {
+        body = {
+            flight_number: (event as any).flight_number,
+            date: (event as any).date
+        };
+    } else if (event.body) {
+      // API Gateway invocation with body
       body = JSON.parse(event.body);
     } else {
+      // API Gateway invocation with query params
       body = {
         flight_number: event.queryStringParameters?.flight_number || '',
         date: event.queryStringParameters?.date || '',
