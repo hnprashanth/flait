@@ -22,16 +22,52 @@ This document tracks pending features and improvements for the FLAIT flight trac
 
 ---
 
-### 2. WhatsApp On-Demand Query Interface
+### 2. WhatsApp On-Demand Query Interface + LLM Integration
 **Status:** Not Implemented  
 **Effort:** High  
-**Description:** Allow users to send messages to the WhatsApp number and get responses about their flights (e.g., "What's my gate?", "Is my flight on time?").
+**Description:** Allow users to send messages to the WhatsApp number and get intelligent responses about their flights using an LLM (Gemini or OpenAI).
+
+**User Queries to Support:**
+- "What's my gate?"
+- "Is my flight on time?"
+- "When should I leave for the airport?"
+- "Will I make my connection?"
+- "What's the weather in Amsterdam?"
+- General travel questions
 
 **Implementation Notes:**
-- Create Twilio webhook endpoint (new Lambda)
-- Parse incoming messages and extract intent
-- Query flight data and respond with relevant info
-- Consider using LLM for natural language understanding
+- Create Twilio webhook endpoint (new Lambda: `whatsapp-handler`)
+- Integrate with Gemini API (preferred) or OpenAI for natural language understanding
+- Build context from user's flight subscriptions and current flight data
+- Use function calling / tool use for structured data retrieval
+- Implement conversation memory for follow-up questions
+- Fallback to simple keyword matching if LLM is unavailable
+
+**Architecture:**
+```
+User WhatsApp Message
+        ↓
+   Twilio Webhook
+        ↓
+  whatsapp-handler Lambda
+        ↓
+   ┌────────────────┐
+   │  LLM (Gemini)  │ ← Context: user's flights, current status
+   └────────────────┘
+        ↓
+   Response Generation
+        ↓
+   Twilio → User
+```
+
+**LLM Provider Options:**
+| Provider | Pros | Cons |
+|----------|------|------|
+| Gemini | Free tier, good function calling, fast | Newer, less ecosystem |
+| OpenAI | Mature, excellent function calling | Cost, rate limits |
+| Claude | Great reasoning | Cost, no direct API in India |
+
+**Recommended:** Start with Gemini (google-generativelanguage API) for cost efficiency.
 
 **PRD Reference:** FLAIT-Assistant-in-the-Air.md → On-Demand Features
 
