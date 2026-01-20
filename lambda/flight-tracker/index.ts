@@ -22,6 +22,28 @@ interface FlightAwareResponse {
   [key: string]: any;
 }
 
+/** Milestone types for proactive notifications */
+type MilestoneType = 'checkin' | '24h' | '12h' | '4h' | 'boarding' | 'pre-landing';
+
+interface MilestoneResult {
+  milestone: MilestoneType;
+  hoursRemaining: number;
+}
+
+interface FlightChange {
+  old: unknown;
+  new: unknown;
+}
+
+interface FlightUpdateEvent {
+  flight_number: string;
+  date: string;
+  update_type: 'milestone' | 'change' | 'combined';
+  milestone?: MilestoneType;
+  changes?: Record<string, FlightChange>;
+  current_status: Record<string, unknown>;
+}
+
 /**
  * Fetches flight information from FlightAware AeroAPI v4
  * Documentation: https://flightaware.com/aeroapi/
@@ -84,10 +106,77 @@ async function getLatestFlightData(flightNumber: string, date: string): Promise<
 }
 
 /**
+ * Detects milestones based on time to departure/arrival.
+ * Returns milestones that should be triggered (not previously sent).
+ * @param departureTime - Scheduled or estimated departure time
+ * @param arrivalTime - Scheduled or estimated arrival time (optional)
+ * @param previousMilestones - Array of milestones already sent for this flight
+ * @param now - Current time (defaults to now, injectable for testing)
+ */
+function detectMilestones(
+  departureTime: Date,
+  arrivalTime: Date | null,
+  previousMilestones: MilestoneType[],
+  now: Date = new Date()
+): MilestoneResult[] {
+  const milestones: MilestoneResult[] = [];
+  const hoursToDeparture = (departureTime.getTime() - now.getTime()) / (1000 * 60 * 60);
+
+  // Check-in reminder: at 24h mark (±30 min window to catch it during polling)
+  if (hoursToDeparture <= 24.5 && hoursToDeparture >= 23.5 && !previousMilestones.includes('checkin')) {
+    milestones.push({ milestone: 'checkin', hoursRemaining: hoursToDeparture });
+  }
+
+  // 24h milestone: when we cross into 24h window (but not at exact checkin time)
+  if (hoursToDeparture <= 24 && hoursToDeparture > 12 && !previousMilestones.includes('24h')) {
+    milestones.push({ milestone: '24h', hoursRemaining: hoursToDeparture });
+  }
+
+  // 12h milestone
+  if (hoursToDeparture <= 12 && hoursToDeparture > 4 && !previousMilestones.includes('12h')) {
+    milestones.push({ milestone: '12h', hoursRemaining: hoursToDeparture });
+  }
+
+  // 4h milestone
+  if (hoursToDeparture <= 4 && hoursToDeparture > 0.6 && !previousMilestones.includes('4h')) {
+    milestones.push({ milestone: '4h', hoursRemaining: hoursToDeparture });
+  }
+
+  // Boarding soon: ~30-35 min before departure
+  if (hoursToDeparture <= 0.6 && hoursToDeparture > 0 && !previousMilestones.includes('boarding')) {
+    milestones.push({ milestone: 'boarding', hoursRemaining: hoursToDeparture });
+  }
+
+  // Pre-landing: 1h before arrival (flight must be in the air)
+  if (arrivalTime && hoursToDeparture < 0) {
+    const hoursToArrival = (arrivalTime.getTime() - now.getTime()) / (1000 * 60 * 60);
+    if (hoursToArrival <= 1.1 && hoursToArrival > 0 && !previousMilestones.includes('pre-landing')) {
+      milestones.push({ milestone: 'pre-landing', hoursRemaining: hoursToArrival });
+    }
+  }
+
+  return milestones;
+}
+
+/**
+ * Extracts departure and arrival times from flight data
+ */
+function extractFlightTimes(flightData: Record<string, unknown>): { departure: Date | null; arrival: Date | null } {
+  // Try estimated first, then scheduled
+  const departureStr = (flightData.estimated_departure || flightData.scheduled_departure) as string | undefined;
+  const arrivalStr = (flightData.estimated_arrival || flightData.scheduled_arrival) as string | undefined;
+
+  return {
+    departure: departureStr ? new Date(departureStr) : null,
+    arrival: arrivalStr ? new Date(arrivalStr) : null,
+  };
+}
+
+/**
  * Compares old and new flight data to detect meaningful changes
  */
-function compareFlightData(oldData: Record<string, any>, newData: FlightAwareResponse): Record<string, any> {
-  const changes: Record<string, any> = {};
+function compareFlightData(oldData: Record<string, any>, newData: FlightAwareResponse): Record<string, FlightChange> {
+  const changes: Record<string, FlightChange> = {};
   
   // Extract fields from new data using the same logic as storage
   const newFields = extractFlightFields(newData);
@@ -131,44 +220,83 @@ function compareFlightData(oldData: Record<string, any>, newData: FlightAwareRes
 }
 
 /**
- * Publishes flight update event to EventBridge
+ * Publishes flight update event to EventBridge.
+ * Handles milestone-only, change-only, or combined (milestone + change) events.
  */
 async function publishFlightUpdate(
-  flightNumber: string, 
-  date: string, 
-  changes: Record<string, any>,
-  flightData: Record<string, any>
+  flightNumber: string,
+  date: string,
+  changes: Record<string, FlightChange>,
+  milestones: MilestoneResult[],
+  flightData: Record<string, unknown>
 ): Promise<void> {
-  if (Object.keys(changes).length === 0) return;
+  const hasChanges = Object.keys(changes).length > 0;
+  const hasMilestones = milestones.length > 0;
 
-  console.log(`Detected changes for ${flightNumber} on ${date}:`, JSON.stringify(changes));
+  if (!hasChanges && !hasMilestones) return;
+
+  // Determine update type
+  let updateType: 'milestone' | 'change' | 'combined';
+  if (hasChanges && hasMilestones) {
+    updateType = 'combined';
+  } else if (hasMilestones) {
+    updateType = 'milestone';
+  } else {
+    updateType = 'change';
+  }
+
+  // Use the most important milestone (priority: boarding > pre-landing > 4h > 12h > 24h > checkin)
+  const milestonePriority: MilestoneType[] = ['boarding', 'pre-landing', '4h', '12h', '24h', 'checkin'];
+  const primaryMilestone = milestones.length > 0
+    ? milestones.sort((a, b) => milestonePriority.indexOf(a.milestone) - milestonePriority.indexOf(b.milestone))[0]
+    : undefined;
+
+  const eventDetail: FlightUpdateEvent = {
+    flight_number: flightNumber,
+    date: date,
+    update_type: updateType,
+    current_status: flightData,
+  };
+
+  if (primaryMilestone) {
+    eventDetail.milestone = primaryMilestone.milestone;
+  }
+
+  if (hasChanges) {
+    eventDetail.changes = changes;
+  }
+
+  console.log(`Publishing ${updateType} event for ${flightNumber} on ${date}:`, {
+    milestone: primaryMilestone?.milestone,
+    changes: hasChanges ? Object.keys(changes) : [],
+  });
 
   const entry = {
     Source: 'com.flait.flight-tracker',
-    DetailType: 'FlightStatusChanged',
-    Detail: JSON.stringify({
-      flight_number: flightNumber,
-      date: date,
-      changes: changes,
-      current_status: flightData
-    }),
+    DetailType: 'FlightUpdate',
+    Detail: JSON.stringify(eventDetail),
     EventBusName: EVENT_BUS_NAME,
   };
 
   await eventBridgeClient.send(new PutEventsCommand({
-    Entries: [entry]
+    Entries: [entry],
   }));
-  
+
   console.log('Published flight update event to EventBridge');
 }
 
 /**
- * Stores flight data in DynamoDB
+ * Stores flight data in DynamoDB with milestone tracking
+ * @param flightNumber - Flight identifier
+ * @param date - Flight date
+ * @param flightData - Raw API response
+ * @param milestonesSent - Array of milestones that have been sent for this flight
  */
 async function storeFlightData(
   flightNumber: string,
   date: string,
-  flightData: FlightAwareResponse
+  flightData: FlightAwareResponse,
+  milestonesSent: MilestoneType[] = []
 ): Promise<void> {
   const partitionKey = `${flightNumber}#${date}`;
   const sortKey = new Date().toISOString(); // created_at timestamp
@@ -180,6 +308,7 @@ async function storeFlightData(
     date: date,
     created_at: sortKey,
     flight_data: flightData,
+    milestones_sent: milestonesSent,
     // Store individual fields for easier querying if needed
     ...extractFlightFields(flightData),
   };
@@ -193,8 +322,47 @@ async function storeFlightData(
 }
 
 /**
- * Extracts common flight fields from FlightAware AeroAPI v4 response for easier querying
- * Adjust this based on the actual AeroAPI v4 response structure
+ * Extracts a simple string value from an airport object or returns the value if already a string.
+ * FlightAware returns airport as objects like { code: "VOBL", code_iata: "BLR", name: "Bengaluru Int'l", ... }
+ */
+function extractAirportCode(airport: unknown): string | null {
+  if (!airport) return null;
+  if (typeof airport === 'string') return airport;
+  if (typeof airport === 'object' && airport !== null) {
+    const airportObj = airport as Record<string, unknown>;
+    // Prefer IATA code, then ICAO code, then generic code
+    return (airportObj.code_iata || airportObj.code_icao || airportObj.code || null) as string | null;
+  }
+  return null;
+}
+
+/**
+ * Extracts timezone from an airport object.
+ */
+function extractAirportTimezone(airport: unknown): string | null {
+  if (!airport) return null;
+  if (typeof airport === 'object' && airport !== null) {
+    const airportObj = airport as Record<string, unknown>;
+    return (airportObj.timezone || null) as string | null;
+  }
+  return null;
+}
+
+/**
+ * Extracts city name from an airport object.
+ */
+function extractAirportCity(airport: unknown): string | null {
+  if (!airport) return null;
+  if (typeof airport === 'object' && airport !== null) {
+    const airportObj = airport as Record<string, unknown>;
+    return (airportObj.city || null) as string | null;
+  }
+  return null;
+}
+
+/**
+ * Extracts common flight fields from FlightAware AeroAPI v4 response for easier querying.
+ * Normalizes complex objects (like airports) to simple string values for reliable comparison.
  * Documentation: https://flightaware.com/aeroapi/documentation
  */
 function extractFlightFields(flightData: FlightAwareResponse): Record<string, any> {
@@ -209,29 +377,41 @@ function extractFlightFields(flightData: FlightAwareResponse): Record<string, an
   }
 
   if (actualData && typeof actualData === 'object') {
-    // Extract common fields (adjust field names based on actual API response)
-    // AeroAPI v4 typically returns fields like:
-    // - ident (flight number)
-    // - origin, destination
-    // - scheduled_out, scheduled_in
-    // - actual_out, actual_in
-    // - status
-    // etc.
+    const data = actualData as Record<string, unknown>;
     
-    if ('ident' in actualData) result.flight_ident = (actualData as any).ident;
-    if ('origin' in actualData) result.departure_airport = (actualData as any).origin;
-    if ('destination' in actualData) result.arrival_airport = (actualData as any).destination;
-    if ('scheduled_out' in actualData) result.scheduled_departure = (actualData as any).scheduled_out;
-    if ('scheduled_in' in actualData) result.scheduled_arrival = (actualData as any).scheduled_in;
-    if ('estimated_out' in actualData) result.estimated_departure = (actualData as any).estimated_out;
-    if ('estimated_in' in actualData) result.estimated_arrival = (actualData as any).estimated_in;
-    if ('actual_out' in actualData) result.actual_departure = (actualData as any).actual_out;
-    if ('actual_in' in actualData) result.actual_arrival = (actualData as any).actual_in;
-    if ('status' in actualData) result.status = (actualData as any).status;
-    if ('gate_origin' in actualData) result.gate_origin = (actualData as any).gate_origin;
-    if ('gate_destination' in actualData) result.gate_destination = (actualData as any).gate_destination;
+    // Flight identifier
+    if ('ident' in data) result.flight_ident = data.ident;
     
-    // Add any other relevant fields from the API response
+    // Airports - extract as simple IATA/ICAO codes for reliable comparison
+    if ('origin' in data) {
+      result.departure_airport = extractAirportCode(data.origin);
+      result.departure_timezone = extractAirportTimezone(data.origin);
+      result.departure_city = extractAirportCity(data.origin);
+    }
+    if ('destination' in data) {
+      result.arrival_airport = extractAirportCode(data.destination);
+      result.arrival_timezone = extractAirportTimezone(data.destination);
+      result.arrival_city = extractAirportCity(data.destination);
+    }
+    
+    // Times - these are already strings
+    if ('scheduled_out' in data) result.scheduled_departure = data.scheduled_out;
+    if ('scheduled_in' in data) result.scheduled_arrival = data.scheduled_in;
+    if ('estimated_out' in data) result.estimated_departure = data.estimated_out;
+    if ('estimated_in' in data) result.estimated_arrival = data.estimated_in;
+    if ('actual_out' in data) result.actual_departure = data.actual_out;
+    if ('actual_in' in data) result.actual_arrival = data.actual_in;
+    
+    // Status
+    if ('status' in data) result.status = data.status;
+    
+    // Gates
+    if ('gate_origin' in data) result.gate_origin = data.gate_origin;
+    if ('gate_destination' in data) result.gate_destination = data.gate_destination;
+    
+    // Terminals
+    if ('terminal_origin' in data) result.terminal_origin = data.terminal_origin;
+    if ('terminal_destination' in data) result.terminal_destination = data.terminal_destination;
   }
   
   return result;
@@ -342,23 +522,45 @@ export const handler = async (
     // Fetch flight information from FlightAware
     console.log(`Fetching flight info for ${body.flight_number} on ${body.date}`);
     const flightData = await fetchFlightInfo(body.flight_number, body.date);
+    const extractedFields = extractFlightFields(flightData);
 
     // Get the previous latest record from DynamoDB
     const oldRecord = await getLatestFlightData(body.flight_number, body.date);
-    
-    // Compare and publish events if changes detected
+
+    // Detect changes
+    let changes: Record<string, FlightChange> = {};
     if (oldRecord) {
-      const changes = compareFlightData(oldRecord, flightData);
-      if (Object.keys(changes).length > 0) {
-        await publishFlightUpdate(body.flight_number, body.date, changes, extractFlightFields(flightData));
-      }
+      changes = compareFlightData(oldRecord, flightData);
     } else {
       console.log(`No previous record found for ${body.flight_number} on ${body.date}. This is the first entry.`);
-      // Optionally publish a "FlightTrackingStarted" event here
     }
 
-    // Store in DynamoDB
-    await storeFlightData(body.flight_number, body.date, flightData);
+    // Detect milestones
+    const previousMilestones: MilestoneType[] = (oldRecord?.milestones_sent as MilestoneType[]) || [];
+    const { departure, arrival } = extractFlightTimes(extractedFields);
+    let newMilestones: MilestoneResult[] = [];
+
+    if (departure) {
+      newMilestones = detectMilestones(departure, arrival, previousMilestones, new Date());
+      if (newMilestones.length > 0) {
+        console.log(`Detected milestones for ${body.flight_number}:`, newMilestones.map(m => m.milestone));
+      }
+    }
+
+    // Publish combined event if there are changes OR milestones
+    if (Object.keys(changes).length > 0 || newMilestones.length > 0) {
+      await publishFlightUpdate(
+        body.flight_number,
+        body.date,
+        changes,
+        newMilestones,
+        extractedFields
+      );
+    }
+
+    // Store in DynamoDB with updated milestones
+    const allMilestones = [...previousMilestones, ...newMilestones.map(m => m.milestone)];
+    await storeFlightData(body.flight_number, body.date, flightData, allMilestones);
     console.log(`Successfully stored flight data for ${body.flight_number} on ${body.date}`);
 
     // Return response based on invocation type

@@ -241,6 +241,7 @@ export class FlaitStack extends cdk.Stack {
       deadLetterQueue: dlq,
       environment: {
         APP_TABLE_NAME: appTable.tableName,
+        FLIGHT_TABLE_NAME: flightTable.tableName,
         TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID || '',
         TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN || '',
         TWILIO_FROM_NUMBER: process.env.TWILIO_FROM_NUMBER || '',
@@ -250,15 +251,16 @@ export class FlaitStack extends cdk.Stack {
       },
     });
 
-    // Grant permissions
+    // Grant permissions - read from both tables for connection analysis
     appTable.grantReadData(notificationDispatcher);
+    flightTable.grantReadData(notificationDispatcher);
 
-    // 3. EventBridge Rule
-    new events.Rule(this, 'FlightStatusRule', {
+    // 3. EventBridge Rule - handles all flight update events (milestones, changes, combined)
+    new events.Rule(this, 'FlightUpdateRule', {
       eventBus: flightBus,
       eventPattern: {
         source: ['com.flait.flight-tracker'],
-        detailType: ['FlightStatusChanged'],
+        detailType: ['FlightUpdate'],
       },
       targets: [new targets.LambdaFunction(notificationDispatcher)],
     });
