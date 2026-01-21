@@ -1,4 +1,4 @@
-import { SchedulerClient, CreateScheduleCommand, FlexibleTimeWindowMode } from '@aws-sdk/client-scheduler';
+import { SchedulerClient, CreateScheduleCommand, DeleteScheduleCommand, ListSchedulesCommand, FlexibleTimeWindowMode } from '@aws-sdk/client-scheduler';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 
 const schedulerClient = new SchedulerClient({});
@@ -9,6 +9,9 @@ const SCHEDULER_ROLE_ARN = process.env.SCHEDULER_ROLE_ARN!;
 interface FlightRequest {
   flight_number: string;
   date: string; // Format: YYYY-MM-DD
+  recalculate?: boolean; // If true, delete existing schedules and recreate
+  new_departure_time?: string; // ISO string of new departure time (used with recalculate)
+  fa_flight_id?: string; // FlightAware unique flight ID (used with recalculate)
 }
 
 interface FlightAwareResponse {
@@ -234,6 +237,50 @@ function generateScheduleName(flightNumber: string, date: string, interval: stri
 }
 
 /**
+ * Deletes all existing schedules for a flight
+ * Schedule names follow pattern: ft-{flight}-{date}-{interval}-{phase}
+ */
+async function deleteExistingSchedules(flightNumber: string, date: string): Promise<number> {
+  const cleanFlightNumber = flightNumber.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const prefix = `ft-${cleanFlightNumber}-${date}`;
+  
+  console.log(`Looking for schedules with prefix: ${prefix}`);
+  
+  let deletedCount = 0;
+  let nextToken: string | undefined;
+  
+  do {
+    // List schedules (no prefix filter in API, so we filter manually)
+    const listCommand = new ListSchedulesCommand({
+      MaxResults: 100,
+      NextToken: nextToken,
+    });
+    
+    const response = await schedulerClient.send(listCommand);
+    nextToken = response.NextToken;
+    
+    if (!response.Schedules) continue;
+    
+    // Filter and delete schedules matching our flight
+    for (const schedule of response.Schedules) {
+      if (schedule.Name && schedule.Name.startsWith(prefix)) {
+        try {
+          await schedulerClient.send(new DeleteScheduleCommand({
+            Name: schedule.Name,
+          }));
+          console.log(`Deleted schedule: ${schedule.Name}`);
+          deletedCount++;
+        } catch (err) {
+          console.error(`Failed to delete schedule ${schedule.Name}:`, err);
+        }
+      }
+    }
+  } while (nextToken);
+  
+  return deletedCount;
+}
+
+/**
  * Creates a recurring EventBridge schedule with start and end times
  * Now includes fa_flight_id for precise flight tracking
  */
@@ -288,7 +335,10 @@ export const handler = async (
     if ((event as any).flight_number) {
         body = {
             flight_number: (event as any).flight_number,
-            date: (event as any).date
+            date: (event as any).date,
+            recalculate: (event as any).recalculate,
+            new_departure_time: (event as any).new_departure_time,
+            fa_flight_id: (event as any).fa_flight_id,
         };
     } else if (event.body) {
       // API Gateway invocation with body
@@ -330,28 +380,48 @@ export const handler = async (
       };
     }
 
-    // Fetch initial flight information to get departure time and fa_flight_id
-    console.log(`Fetching flight info for ${body.flight_number} on ${body.date}`);
-    const flightData = await fetchFlightInfo(body.flight_number, body.date);
-    
-    // Extract departure time and fa_flight_id
-    const flightInfo = extractFlightInfo(flightData, body.date);
-    if (!flightInfo) {
-      return {
-        statusCode: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
-        body: JSON.stringify({
-          error: 'Could not find flight for the specified date',
-          flight_data: flightData,
-        }),
-      };
+    // If recalculating, delete existing schedules first
+    let deletedCount = 0;
+    if (body.recalculate) {
+      console.log(`Recalculating schedules for ${body.flight_number} on ${body.date}`);
+      deletedCount = await deleteExistingSchedules(body.flight_number, body.date);
+      console.log(`Deleted ${deletedCount} existing schedules`);
     }
 
-    const { departureTime, faFlightId } = flightInfo;
-    console.log(`Flight found: fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}`);
+    let departureTime: Date;
+    let faFlightId: string;
+
+    // If recalculating with provided departure time and fa_flight_id, use those
+    if (body.recalculate && body.new_departure_time && body.fa_flight_id) {
+      departureTime = new Date(body.new_departure_time);
+      faFlightId = body.fa_flight_id;
+      console.log(`Using provided departure time: ${departureTime.toISOString()}, fa_flight_id: ${faFlightId}`);
+    } else {
+      // Fetch flight information to get departure time and fa_flight_id
+      console.log(`Fetching flight info for ${body.flight_number} on ${body.date}`);
+      const flightData = await fetchFlightInfo(body.flight_number, body.date);
+      
+      // Extract departure time and fa_flight_id
+      const flightInfo = extractFlightInfo(flightData, body.date);
+      if (!flightInfo) {
+        return {
+          statusCode: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+          body: JSON.stringify({
+            error: 'Could not find flight for the specified date',
+            flight_data: flightData,
+          }),
+        };
+      }
+
+      departureTime = flightInfo.departureTime;
+      faFlightId = flightInfo.faFlightId;
+    }
+
+    console.log(`Flight: fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}`);
 
     const now = new Date();
     const timeToDeparture = departureTime.getTime() - now.getTime();
@@ -428,11 +498,12 @@ export const handler = async (
         'Access-Control-Allow-Origin': '*',
       },
       body: JSON.stringify({
-        message: 'Schedules created successfully',
+        message: body.recalculate ? 'Schedules recalculated successfully' : 'Schedules created successfully',
         flight_number: body.flight_number,
         date: body.date,
         fa_flight_id: faFlightId,
         departure_time: departureTime.toISOString(),
+        schedules_deleted: deletedCount > 0 ? deletedCount : undefined,
         schedules_created: createdSchedules.length,
         schedules: createdSchedules,
         errors: errors.length > 0 ? errors : undefined,

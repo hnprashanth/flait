@@ -1,15 +1,18 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const eventBridgeClient = new EventBridgeClient({});
+const lambdaClient = new LambdaClient({});
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const FLIGHTAWARE_API_KEY = process.env.FLIGHTAWARE_API_KEY!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
+const SCHEDULE_TRACKER_FUNCTION_NAME = process.env.SCHEDULE_TRACKER_FUNCTION_NAME;
 
 /**
  * Returns the next day in YYYY-MM-DD format
@@ -241,6 +244,76 @@ function compareFlightData(oldData: Record<string, any>, newData: FlightAwareRes
   }
   
   return changes;
+}
+
+/** Minimum time change (in minutes) to trigger schedule recalculation */
+const SCHEDULE_RECALC_THRESHOLD_MINUTES = 30;
+
+/**
+ * Checks if departure time has changed significantly and triggers schedule recalculation
+ * @param changes - Detected flight changes
+ * @param flightNumber - Flight identifier
+ * @param date - Flight date
+ * @param faFlightId - FlightAware unique flight ID
+ * @returns true if recalculation was triggered
+ */
+async function checkAndRecalculateSchedules(
+  changes: Record<string, FlightChange>,
+  flightNumber: string,
+  date: string,
+  faFlightId: string | undefined
+): Promise<boolean> {
+  if (!SCHEDULE_TRACKER_FUNCTION_NAME) {
+    console.log('SCHEDULE_TRACKER_FUNCTION_NAME not configured, skipping schedule recalculation');
+    return false;
+  }
+
+  // Check for significant departure time changes
+  const departureFields = ['estimated_departure', 'scheduled_departure'];
+  
+  for (const field of departureFields) {
+    if (changes[field]) {
+      const oldTime = changes[field].old as string | undefined;
+      const newTime = changes[field].new as string | undefined;
+      
+      if (oldTime && newTime) {
+        const oldDate = new Date(oldTime);
+        const newDate = new Date(newTime);
+        const diffMinutes = Math.abs(newDate.getTime() - oldDate.getTime()) / (1000 * 60);
+        
+        if (diffMinutes >= SCHEDULE_RECALC_THRESHOLD_MINUTES) {
+          console.log(`Significant departure time change detected: ${diffMinutes.toFixed(0)} minutes`);
+          console.log(`Old: ${oldTime}, New: ${newTime}`);
+          
+          // Trigger schedule recalculation
+          try {
+            const payload = {
+              flight_number: flightNumber,
+              date: date,
+              recalculate: true,
+              new_departure_time: newTime,
+              fa_flight_id: faFlightId,
+            };
+            
+            console.log(`Invoking schedule recalculation with payload:`, payload);
+            
+            await lambdaClient.send(new InvokeCommand({
+              FunctionName: SCHEDULE_TRACKER_FUNCTION_NAME,
+              InvocationType: 'Event', // Async invocation
+              Payload: JSON.stringify(payload),
+            }));
+            
+            console.log('Schedule recalculation triggered successfully');
+            return true;
+          } catch (err) {
+            console.error('Failed to trigger schedule recalculation:', err);
+          }
+        }
+      }
+    }
+  }
+  
+  return false;
 }
 
 /**
@@ -570,6 +643,16 @@ export const handler = async (
     let changes: Record<string, FlightChange> = {};
     if (oldRecord) {
       changes = compareFlightData(oldRecord, flightData);
+      
+      // Check if departure time changed significantly and recalculate schedules
+      if (Object.keys(changes).length > 0) {
+        await checkAndRecalculateSchedules(
+          changes,
+          body.flight_number,
+          body.date,
+          extractedFields.fa_flight_id || faFlightId
+        );
+      }
     } else {
       console.log(`No previous record found for ${body.flight_number} on ${body.date}. This is the first entry.`);
     }

@@ -1,6 +1,6 @@
 # Pending Work - FLAIT
 
-Last updated: 2026-01-21
+Last updated: 2026-01-21 (evening)
 
 ## Overview
 
@@ -10,15 +10,11 @@ This document tracks pending features and improvements for the FLAIT flight trac
 
 ## High Priority
 
-### 1. Schedule Recalculation on Delay
-**Status:** Not Implemented  
-**Effort:** Medium  
-**Description:** When a flight is delayed, the polling schedules should be recalculated based on the new departure time. Currently, schedules are created once at subscription time and don't adapt to delays.
+### ~~1. Schedule Recalculation on Delay~~ ✅ COMPLETED
+**Status:** Implemented  
+**Completed:** 2026-01-21
 
-**Implementation Notes:**
-- Modify `flight-tracker` to detect significant time changes
-- Call `schedule-flight-tracker` to recreate schedules when departure time shifts by >30 minutes
-- Need to handle schedule deletion and recreation
+When departure time changes by >30 minutes, flight-tracker automatically triggers schedule recalculation. The schedule-tracker deletes old schedules and creates new ones based on the updated departure time.
 
 ---
 
@@ -235,6 +231,7 @@ User WhatsApp Message
 - [x] Local timezone display in notifications
 - [x] City names in route display
 - [x] Precise flight tracking with `fa_flight_id` (prevents wrong flight data as time passes)
+- [x] Schedule recalculation on delay (>30 min departure change triggers schedule rebuild)
 
 ---
 

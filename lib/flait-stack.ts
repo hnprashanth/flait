@@ -35,7 +35,8 @@ export class FlaitStack extends cdk.Stack {
       eventBusName: 'flight-tracker-bus',
     });
 
-    // Create Lambda function
+    // Create Lambda function for flight tracking
+    // Uses a fixed function name for schedule-tracker to avoid circular dependency
     const flightTrackerFunction = new NodejsFunction(this, 'FlightTrackerFunction', {
       functionName: 'flight-tracker',
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -46,6 +47,7 @@ export class FlaitStack extends cdk.Stack {
         TABLE_NAME: flightTable.tableName,
         FLIGHTAWARE_API_KEY: process.env.FLIGHTAWARE_API_KEY || '',
         EVENT_BUS_NAME: flightBus.eventBusName,
+        SCHEDULE_TRACKER_FUNCTION_NAME: 'schedule-flight-tracker', // Fixed name to avoid circular dep
       },
       bundling: {
         externalModules: ['@aws-sdk'],
@@ -84,7 +86,7 @@ export class FlaitStack extends cdk.Stack {
       },
     });
 
-    // Grant schedule-flight-tracker Lambda permissions to create EventBridge schedules
+    // Grant schedule-flight-tracker Lambda permissions to manage EventBridge schedules
     scheduleFlightTrackerFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -93,8 +95,19 @@ export class FlaitStack extends cdk.Stack {
           'scheduler:DeleteSchedule',
           'scheduler:GetSchedule',
           'scheduler:UpdateSchedule',
+          'scheduler:ListSchedules',
         ],
         resources: ['*'], // EventBridge Scheduler doesn't support resource-level permissions yet
+      })
+    );
+
+    // Grant flight-tracker permission to invoke schedule-tracker for recalculation
+    // Using direct policy to avoid circular dependency
+    flightTrackerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['lambda:InvokeFunction'],
+        resources: [`arn:aws:lambda:${this.region}:${this.account}:function:schedule-flight-tracker`],
       })
     );
 
