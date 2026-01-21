@@ -1,6 +1,6 @@
 # Pending Work - FLAIT
 
-Last updated: 2026-01-21 (evening)
+Last updated: 2026-01-21 (night)
 
 ## Overview
 
@@ -18,54 +18,20 @@ When departure time changes by >30 minutes, flight-tracker automatically trigger
 
 ---
 
-### 2. WhatsApp On-Demand Query Interface + LLM Integration
-**Status:** Not Implemented  
-**Effort:** High  
-**Description:** Allow users to send messages to the WhatsApp number and get intelligent responses about their flights using an LLM (Gemini or OpenAI).
+### ~~2. WhatsApp On-Demand Query Interface + LLM Integration~~ ✅ COMPLETED
+**Status:** Implemented  
+**Completed:** 2026-01-21
 
-**User Queries to Support:**
-- "What's my gate?"
-- "Is my flight on time?"
-- "When should I leave for the airport?"
-- "Will I make my connection?"
-- "What's the weather in Amsterdam?"
-- General travel questions
+Users can now send WhatsApp messages to the Flait number and receive intelligent responses powered by Gemini 2.0 Flash. The assistant (named "Flait") answers questions about tracked flights and general travel queries.
 
-**Implementation Notes:**
-- Create Twilio webhook endpoint (new Lambda: `whatsapp-handler`)
-- Integrate with Gemini API (preferred) or OpenAI for natural language understanding
-- Build context from user's flight subscriptions and current flight data
-- Use function calling / tool use for structured data retrieval
-- Implement conversation memory for follow-up questions
-- Fallback to simple keyword matching if LLM is unavailable
+**Features:**
+- Natural language understanding via Gemini 2.0 Flash
+- Flight context awareness (pulls user's subscriptions and current flight data)
+- Travel assistant personality for general questions
+- Rate limiting (20 queries/hour per user)
+- Graceful error handling
 
-**Architecture:**
-```
-User WhatsApp Message
-        ↓
-   Twilio Webhook
-        ↓
-  whatsapp-handler Lambda
-        ↓
-   ┌────────────────┐
-   │  LLM (Gemini)  │ ← Context: user's flights, current status
-   └────────────────┘
-        ↓
-   Response Generation
-        ↓
-   Twilio → User
-```
-
-**LLM Provider Options:**
-| Provider | Pros | Cons |
-|----------|------|------|
-| Gemini | Free tier, good function calling, fast | Newer, less ecosystem |
-| OpenAI | Mature, excellent function calling | Cost, rate limits |
-| Claude | Great reasoning | Cost, no direct API in India |
-
-**Recommended:** Start with Gemini (google-generativelanguage API) for cost efficiency.
-
-**PRD Reference:** FLAIT-Assistant-in-the-Air.md → On-Demand Features
+**Webhook URL:** `https://3x1f2jf6p4.execute-api.ap-south-1.amazonaws.com/prod/whatsapp`
 
 ---
 
@@ -232,6 +198,8 @@ User WhatsApp Message
 - [x] City names in route display
 - [x] Precise flight tracking with `fa_flight_id` (prevents wrong flight data as time passes)
 - [x] Schedule recalculation on delay (>30 min departure change triggers schedule rebuild)
+- [x] WhatsApp on-demand query interface with Gemini 2.0 Flash LLM
+- [x] Rate limiting for WhatsApp queries (20/hour)
 
 ---
 

@@ -277,5 +277,41 @@ export class FlaitStack extends cdk.Stack {
       },
       targets: [new targets.LambdaFunction(notificationDispatcher)],
     });
+
+    // --- WhatsApp Query Handler (Gemini-powered assistant) ---
+
+    const whatsappQueryHandler = new NodejsFunction(this, 'WhatsAppQueryHandler', {
+      functionName: 'whatsapp-query-handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.join(__dirname, '../lambda/whatsapp-query-handler/index.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(30), // Gemini calls may take time
+      environment: {
+        APP_TABLE_NAME: appTable.tableName,
+        FLIGHT_TABLE_NAME: flightTable.tableName,
+        GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
+        TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID || '',
+        TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN || '',
+        TWILIO_FROM_NUMBER: process.env.TWILIO_FROM_NUMBER || '',
+      },
+      bundling: {
+        minify: true,
+      },
+    });
+
+    // Grant permissions - read from both tables, write to app table for rate limiting
+    appTable.grantReadWriteData(whatsappQueryHandler);
+    flightTable.grantReadData(whatsappQueryHandler);
+
+    // API Gateway route for Twilio webhook
+    const whatsappResource = api.root.addResource('whatsapp');
+    const whatsappIntegration = new apigateway.LambdaIntegration(whatsappQueryHandler);
+    whatsappResource.addMethod('POST', whatsappIntegration);
+
+    // Output the WhatsApp webhook URL
+    new cdk.CfnOutput(this, 'WhatsAppWebhookUrl', {
+      value: `${api.url}whatsapp`,
+      description: 'WhatsApp webhook URL for Twilio',
+    });
   }
 }
