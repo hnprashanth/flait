@@ -1,6 +1,6 @@
 # Pending Work - FLAIT
 
-Last updated: 2026-01-20
+Last updated: 2026-01-21
 
 ## Overview
 
@@ -234,6 +234,7 @@ User WhatsApp Message
 - [x] Smart connection analysis with risk assessment
 - [x] Local timezone display in notifications
 - [x] City names in route display
+- [x] Precise flight tracking with `fa_flight_id` (prevents wrong flight data as time passes)
 
 ---
 
