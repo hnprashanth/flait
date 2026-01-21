@@ -11,9 +11,19 @@ const TABLE_NAME = process.env.TABLE_NAME!;
 const FLIGHTAWARE_API_KEY = process.env.FLIGHTAWARE_API_KEY!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 
+/**
+ * Returns the next day in YYYY-MM-DD format
+ */
+function getNextDay(dateStr: string): string {
+  const date = new Date(dateStr);
+  date.setDate(date.getDate() + 1);
+  return date.toISOString().split('T')[0];
+}
+
 interface FlightRequest {
   flight_number: string;
   date: string; // Format: YYYY-MM-DD
+  fa_flight_id?: string; // FlightAware unique flight ID for precise tracking
 }
 
 interface FlightAwareResponse {
@@ -47,17 +57,31 @@ interface FlightUpdateEvent {
 /**
  * Fetches flight information from FlightAware AeroAPI v4
  * Documentation: https://flightaware.com/aeroapi/
- * AeroAPI v4 only requires an API key (no username needed)
+ * 
+ * @param flightNumber - Flight ident (e.g., "KL880")
+ * @param date - Flight date in YYYY-MM-DD format
+ * @param faFlightId - Optional FlightAware unique flight ID for precise tracking
  */
-async function fetchFlightInfo(flightNumber: string, date: string): Promise<FlightAwareResponse> {
+async function fetchFlightInfo(flightNumber: string, date: string, faFlightId?: string): Promise<FlightAwareResponse> {
   if (!FLIGHTAWARE_API_KEY) {
     throw new Error('FlightAware API key not configured');
   }
 
-  // FlightAware AeroAPI v4 endpoint
-  // Documentation: https://flightaware.com/aeroapi/documentation
-  // Endpoint: /flights/{ident} - returns current status of a flight
-  const url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}`;
+  let url: string;
+
+  if (faFlightId) {
+    // Use precise fa_flight_id query for exact flight tracking
+    // This ensures we always get the same flight instance
+    url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(faFlightId)}`;
+    console.log(`Fetching flight by fa_flight_id: ${faFlightId}`);
+  } else {
+    // Fall back to date-filtered ident query
+    // Add date range to filter for the specific flight date
+    const startDate = date; // e.g., "2026-01-21"
+    const endDate = getNextDay(date); // e.g., "2026-01-22"
+    url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}?start=${startDate}&end=${endDate}`;
+    console.log(`Fetching flight by ident with date filter: ${flightNumber} from ${startDate} to ${endDate}`);
+  }
   
   const response = await fetch(url, {
     method: 'GET',
@@ -404,6 +428,7 @@ function extractFlightFields(flightData: FlightAwareResponse): Record<string, an
     
     // Status
     if ('status' in data) result.status = data.status;
+    if ('cancelled' in data) result.cancelled = data.cancelled;
     
     // Gates
     if ('gate_origin' in data) result.gate_origin = data.gate_origin;
@@ -412,6 +437,9 @@ function extractFlightFields(flightData: FlightAwareResponse): Record<string, an
     // Terminals
     if ('terminal_origin' in data) result.terminal_origin = data.terminal_origin;
     if ('terminal_destination' in data) result.terminal_destination = data.terminal_destination;
+
+    // FlightAware unique flight ID - critical for precise tracking
+    if ('fa_flight_id' in data) result.fa_flight_id = data.fa_flight_id;
   }
   
   return result;
@@ -434,6 +462,7 @@ function extractFlightRequest(event: any): FlightRequest | null {
       return {
         flight_number: apiEvent.queryStringParameters.flight_number || '',
         date: apiEvent.queryStringParameters.date || '',
+        fa_flight_id: apiEvent.queryStringParameters.fa_flight_id,
       };
     }
     return null;
@@ -444,6 +473,7 @@ function extractFlightRequest(event: any): FlightRequest | null {
     return {
       flight_number: event.flight_number,
       date: event.date,
+      fa_flight_id: event.fa_flight_id, // May be undefined for legacy invocations
     };
   }
   
@@ -519,13 +549,22 @@ export const handler = async (
       }
     }
 
-    // Fetch flight information from FlightAware
-    console.log(`Fetching flight info for ${body.flight_number} on ${body.date}`);
-    const flightData = await fetchFlightInfo(body.flight_number, body.date);
-    const extractedFields = extractFlightFields(flightData);
-
     // Get the previous latest record from DynamoDB
     const oldRecord = await getLatestFlightData(body.flight_number, body.date);
+
+    // Determine fa_flight_id to use: from request, from previous record, or none
+    const faFlightId = body.fa_flight_id || oldRecord?.fa_flight_id as string | undefined;
+
+    // Fetch flight information from FlightAware
+    console.log(`Fetching flight info for ${body.flight_number} on ${body.date}${faFlightId ? ` (fa_flight_id: ${faFlightId})` : ''}`);
+    const flightData = await fetchFlightInfo(body.flight_number, body.date, faFlightId);
+    const extractedFields = extractFlightFields(flightData);
+
+    // Validate we got the right flight - check if fa_flight_id matches
+    if (faFlightId && extractedFields.fa_flight_id && extractedFields.fa_flight_id !== faFlightId) {
+      console.warn(`fa_flight_id mismatch! Expected: ${faFlightId}, Got: ${extractedFields.fa_flight_id}`);
+      // This could indicate the flight was cancelled and replaced - continue but log warning
+    }
 
     // Detect changes
     let changes: Record<string, FlightChange> = {};

@@ -65,9 +65,10 @@ async function subscribe(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
   // Ideally, we check if PK=USER#{phone} exists.
 
   // 2. Check if Flight is being tracked
-  const isTracked = await checkFlightExists(flight_number, date);
+  const existingFlight = await getExistingFlightData(flight_number, date);
+  let faFlightId: string | undefined;
 
-  if (!isTracked) {
+  if (!existingFlight) {
     console.log(`Flight ${flight_number} on ${date} not found. Attempting to provision...`);
     
     // 2a. Provision: Invoke Flight Tracker (Verify & Fetch Initial Data)
@@ -83,8 +84,11 @@ async function subscribe(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
     }
 
     // 2b. Provision: Invoke Schedule Tracker (Start Background Polling)
+    // This will return fa_flight_id in the response
     try {
-      await invokeLambda(SCHEDULE_TRACKER_FUNCTION_NAME, { flight_number, date });
+      const scheduleResult = await invokeLambdaWithResponse(SCHEDULE_TRACKER_FUNCTION_NAME, { flight_number, date });
+      faFlightId = scheduleResult?.fa_flight_id;
+      console.log(`Schedule created with fa_flight_id: ${faFlightId}`);
     } catch (err) {
       console.error('Failed to invoke Schedule Tracker:', err);
       return { 
@@ -92,10 +96,20 @@ async function subscribe(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
         body: JSON.stringify({ error: 'Failed to schedule flight tracking.' }) 
       };
     }
+
+    // If we still don't have fa_flight_id, try to get it from the newly created flight data
+    if (!faFlightId) {
+      const newFlightData = await getExistingFlightData(flight_number, date);
+      faFlightId = newFlightData?.fa_flight_id;
+    }
+  } else {
+    // Flight already exists, get fa_flight_id from existing data
+    faFlightId = existingFlight.fa_flight_id;
+    console.log(`Using existing fa_flight_id: ${faFlightId}`);
   }
 
-  // 3. Save Subscription
-  const subscriptionItem = {
+  // 3. Save Subscription with fa_flight_id
+  const subscriptionItem: Record<string, unknown> = {
     PK: `USER#${phone}`,
     SK: `SUB#${date}#${flight_number}`,
     GSI1PK: `FLIGHT#${flight_number}#${date}`,
@@ -103,6 +117,11 @@ async function subscribe(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
     createdAt: new Date().toISOString(),
     status: 'ACTIVE',
   };
+
+  // Add fa_flight_id if available
+  if (faFlightId) {
+    subscriptionItem.fa_flight_id = faFlightId;
+  }
 
   await docClient.send(new PutCommand({
     TableName: APP_TABLE_NAME,
@@ -138,18 +157,24 @@ async function getSubscriptions(event: APIGatewayProxyEvent): Promise<APIGateway
   };
 }
 
-async function checkFlightExists(flightNumber: string, date: string): Promise<boolean> {
-  // Check if any record exists for this flight in the main flight-data table
+/**
+ * Gets the latest flight data record if it exists, including fa_flight_id
+ */
+async function getExistingFlightData(flightNumber: string, date: string): Promise<Record<string, any> | null> {
   const response = await docClient.send(new QueryCommand({
     TableName: FLIGHT_TABLE_NAME,
     KeyConditionExpression: 'PK = :pk',
     ExpressionAttributeValues: {
       ':pk': `${flightNumber}#${date}`,
     },
+    ScanIndexForward: false, // Get latest first
     Limit: 1,
   }));
 
-  return !!(response.Items && response.Items.length > 0);
+  if (response.Items && response.Items.length > 0) {
+    return response.Items[0];
+  }
+  return null;
 }
 
 async function invokeLambda(functionName: string, payload: any): Promise<void> {
@@ -178,4 +203,45 @@ async function invokeLambda(functionName: string, payload: any): Promise<void> {
           // Ignore parsing error if it's not JSON
       }
   }
+}
+
+/**
+ * Invokes a Lambda function and returns the parsed response body
+ * @param functionName - Name of the Lambda function to invoke
+ * @param payload - Payload to send to the Lambda
+ * @returns Parsed response body or null
+ */
+async function invokeLambdaWithResponse(functionName: string, payload: any): Promise<any> {
+  const command = new InvokeCommand({
+    FunctionName: functionName,
+    InvocationType: 'RequestResponse',
+    Payload: JSON.stringify(payload),
+  });
+
+  const response = await lambdaClient.send(command);
+
+  if (response.FunctionError) {
+    throw new Error(`Lambda ${functionName} failed: ${response.FunctionError}`);
+  }
+  
+  if (response.Payload) {
+    const resultStr = new TextDecoder().decode(response.Payload);
+    try {
+      const result = JSON.parse(resultStr);
+      if (result.errorMessage) {
+        throw new Error(`Lambda ${functionName} returned error: ${result.errorMessage}`);
+      }
+      // Parse the body if it's an API Gateway response format
+      if (result.body && typeof result.body === 'string') {
+        return JSON.parse(result.body);
+      }
+      return result;
+    } catch (e) {
+      // If parsing fails, return null
+      if (e instanceof Error && e.message.includes('returned error')) {
+        throw e;
+      }
+    }
+  }
+  return null;
 }

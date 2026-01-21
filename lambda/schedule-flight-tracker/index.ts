@@ -15,16 +15,35 @@ interface FlightAwareResponse {
   [key: string]: any;
 }
 
+interface FlightInfo {
+  departureTime: Date;
+  faFlightId: string;
+}
 
 /**
- * Fetches flight information from FlightAware AeroAPI v4 to get actual departure time
+ * Returns the next day in YYYY-MM-DD format
+ */
+function getNextDay(dateStr: string): string {
+  const date = new Date(dateStr);
+  date.setDate(date.getDate() + 1);
+  return date.toISOString().split('T')[0];
+}
+
+/**
+ * Fetches flight information from FlightAware AeroAPI v4 with date filtering
+ * to get the correct flight for the specified date
  */
 async function fetchFlightInfo(flightNumber: string, date: string): Promise<FlightAwareResponse> {
   if (!FLIGHTAWARE_API_KEY) {
     throw new Error('FlightAware API key not configured');
   }
 
-  const url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}`;
+  // Use date filtering to get the correct flight for the specified date
+  const startDate = date;
+  const endDate = getNextDay(date);
+  const url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}?start=${startDate}&end=${endDate}`;
+  
+  console.log(`Fetching from FlightAware: ${url}`);
   
   const response = await fetch(url, {
     method: 'GET',
@@ -44,34 +63,53 @@ async function fetchFlightInfo(flightNumber: string, date: string): Promise<Flig
 }
 
 /**
- * Extracts departure time from FlightAware response
- * Tries actual_out first, then scheduled_out, then estimated_out
+ * Extracts departure time and fa_flight_id from FlightAware response
+ * @param flightData - FlightAware API response
+ * @param targetDate - The date we're looking for (YYYY-MM-DD)
+ * @returns FlightInfo with departure time and fa_flight_id, or null if not found
  */
-function extractDepartureTime(flightData: FlightAwareResponse): Date | null {
-  // Try to get actual departure time first
-  if (flightData.actual_out) {
-    return new Date(flightData.actual_out);
+function extractFlightInfo(flightData: FlightAwareResponse, targetDate: string): FlightInfo | null {
+  // AeroAPI v4 returns flights in an array
+  if (!Array.isArray(flightData.flights) || flightData.flights.length === 0) {
+    console.warn('No flights found in response');
+    return null;
   }
-  
-  // Fall back to scheduled departure
-  if (flightData.scheduled_out) {
-    return new Date(flightData.scheduled_out);
+
+  // Find the flight matching the target date
+  // scheduled_out format: "2026-01-21T21:00:00Z"
+  for (const flight of flightData.flights) {
+    const scheduledOut = flight.scheduled_out || flight.estimated_out || flight.actual_out;
+    if (!scheduledOut) continue;
+
+    const flightDate = scheduledOut.split('T')[0]; // Extract YYYY-MM-DD
+    
+    if (flightDate === targetDate) {
+      const departureTime = new Date(flight.actual_out || flight.estimated_out || flight.scheduled_out);
+      const faFlightId = flight.fa_flight_id;
+
+      if (!faFlightId) {
+        console.warn('Flight found but missing fa_flight_id');
+        return null;
+      }
+
+      console.log(`Found flight for ${targetDate}: fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}`);
+      return { departureTime, faFlightId };
+    }
   }
+
+  // If no exact date match, use the first flight (fallback for edge cases)
+  console.warn(`No exact date match for ${targetDate}, using first flight from response`);
+  const firstFlight = flightData.flights[0];
+  const scheduledOut = firstFlight.actual_out || firstFlight.estimated_out || firstFlight.scheduled_out;
   
-  // Try estimated departure
-  if (flightData.estimated_out) {
-    return new Date(flightData.estimated_out);
+  if (!scheduledOut || !firstFlight.fa_flight_id) {
+    return null;
   }
-  
-  // If no departure time found, try looking in flights array (AeroAPI v4 may return array)
-  if (Array.isArray(flightData.flights) && flightData.flights.length > 0) {
-    const firstFlight = flightData.flights[0];
-    if (firstFlight.actual_out) return new Date(firstFlight.actual_out);
-    if (firstFlight.scheduled_out) return new Date(firstFlight.scheduled_out);
-    if (firstFlight.estimated_out) return new Date(firstFlight.estimated_out);
-  }
-  
-  return null;
+
+  return {
+    departureTime: new Date(scheduledOut),
+    faFlightId: firstFlight.fa_flight_id,
+  };
 }
 
 /**
@@ -197,6 +235,7 @@ function generateScheduleName(flightNumber: string, date: string, interval: stri
 
 /**
  * Creates a recurring EventBridge schedule with start and end times
+ * Now includes fa_flight_id for precise flight tracking
  */
 async function createRecurringSchedule(
   scheduleName: string,
@@ -204,11 +243,12 @@ async function createRecurringSchedule(
   endTime: Date,
   interval: string,
   flightNumber: string,
-  date: string
+  date: string,
+  faFlightId: string
 ): Promise<void> {
   const scheduleExpression = intervalToRateExpression(interval);
   
-  // Create the schedule
+  // Create the schedule with fa_flight_id in the payload
   const command = new CreateScheduleCommand({
     Name: scheduleName,
     Description: `Flight tracker schedule for ${flightNumber} on ${date} - ${interval} interval`,
@@ -225,6 +265,7 @@ async function createRecurringSchedule(
       Input: JSON.stringify({
         flight_number: flightNumber,
         date: date,
+        fa_flight_id: faFlightId, // Include for precise flight tracking
       }),
     },
     State: 'ENABLED',
@@ -289,13 +330,13 @@ export const handler = async (
       };
     }
 
-    // Fetch initial flight information to get departure time
+    // Fetch initial flight information to get departure time and fa_flight_id
     console.log(`Fetching flight info for ${body.flight_number} on ${body.date}`);
     const flightData = await fetchFlightInfo(body.flight_number, body.date);
     
-    // Extract departure time
-    const departureTime = extractDepartureTime(flightData);
-    if (!departureTime) {
+    // Extract departure time and fa_flight_id
+    const flightInfo = extractFlightInfo(flightData, body.date);
+    if (!flightInfo) {
       return {
         statusCode: 400,
         headers: {
@@ -303,11 +344,14 @@ export const handler = async (
           'Access-Control-Allow-Origin': '*',
         },
         body: JSON.stringify({
-          error: 'Could not determine departure time from flight data',
+          error: 'Could not find flight for the specified date',
           flight_data: flightData,
         }),
       };
     }
+
+    const { departureTime, faFlightId } = flightInfo;
+    console.log(`Flight found: fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}`);
 
     const now = new Date();
     const timeToDeparture = departureTime.getTime() - now.getTime();
@@ -364,7 +408,8 @@ export const handler = async (
           phase.endTime,
           phase.interval,
           body.flight_number,
-          body.date
+          body.date,
+          faFlightId
         );
         
         createdSchedules.push(scheduleName);
@@ -386,6 +431,7 @@ export const handler = async (
         message: 'Schedules created successfully',
         flight_number: body.flight_number,
         date: body.date,
+        fa_flight_id: faFlightId,
         departure_time: departureTime.toISOString(),
         schedules_created: createdSchedules.length,
         schedules: createdSchedules,
