@@ -17,6 +17,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID!;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN!;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER!;
+const FLIGHTAWARE_API_KEY = process.env.FLIGHTAWARE_API_KEY!;
 
 // --- Constants ---
 const RATE_LIMIT_MAX_QUERIES = 20;
@@ -123,6 +124,43 @@ interface ConversationMessage {
   timestamp: string;
 }
 
+/** Flight subscription request from Gemini */
+interface SubscriptionRequest {
+  flight_number: string;
+  date_text: string;  // e.g., "tomorrow", "Jan 25", "next Monday"
+}
+
+/** Parsed Gemini response - either subscription intent or regular query */
+interface ParsedGeminiResponse {
+  intent: 'subscribe' | 'query';
+  flights?: SubscriptionRequest[];
+  text?: string;
+}
+
+/** Flight info from FlightAware for validation */
+interface FlightValidationResult {
+  valid: boolean;
+  flight_number: string;
+  date: string;  // Resolved YYYY-MM-DD
+  fa_flight_id?: string;
+  departure_airport?: string;
+  departure_city?: string;
+  arrival_airport?: string;
+  arrival_city?: string;
+  departure_time?: string;
+  departure_timezone?: string;
+  error?: string;
+}
+
+/** Subscription result */
+interface SubscriptionResult {
+  success: boolean;
+  flight_number: string;
+  date: string;
+  message: string;
+  flight_info?: FlightValidationResult;
+}
+
 /**
  * Saves a message to the conversation history
  */
@@ -177,6 +215,483 @@ async function getConversationHistory(phone: string): Promise<ConversationMessag
     console.error('Error fetching conversation history:', error);
     return [];
   }
+}
+
+// --- Subscription Functions ---
+
+/**
+ * Parses Gemini response to detect subscription intent or regular query
+ */
+function parseGeminiResponse(response: string): ParsedGeminiResponse {
+  const trimmed = response.trim();
+  
+  // Check if response is JSON (subscription intent)
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.intent === 'subscribe' && Array.isArray(parsed.flights)) {
+        return {
+          intent: 'subscribe',
+          flights: parsed.flights as SubscriptionRequest[],
+        };
+      }
+    } catch {
+      // Not valid JSON, treat as regular text
+    }
+  }
+  
+  // Regular text response
+  return {
+    intent: 'query',
+    text: response,
+  };
+}
+
+/**
+ * Resolves a relative date text to an actual date in a given timezone.
+ * @param dateText - e.g., "tomorrow", "next Monday", "Jan 25", "in 3 days"
+ * @param timezone - IANA timezone string (e.g., "Europe/Amsterdam")
+ * @returns Date string in YYYY-MM-DD format
+ */
+function resolveDateInTimezone(dateText: string, timezone: string): string {
+  // Get current date in the target timezone
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-CA', { 
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const todayStr = formatter.format(now);
+  const todayParts = todayStr.split('-');
+  const todayInTz = new Date(parseInt(todayParts[0]), parseInt(todayParts[1]) - 1, parseInt(todayParts[2]));
+  
+  const lowerText = dateText.toLowerCase().trim();
+  
+  // Handle relative dates
+  if (lowerText === 'today') {
+    return todayStr;
+  }
+  
+  if (lowerText === 'tomorrow') {
+    const tomorrow = new Date(todayInTz);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return tomorrow.toISOString().split('T')[0];
+  }
+  
+  if (lowerText === 'day after tomorrow' || lowerText === 'day after') {
+    const dayAfter = new Date(todayInTz);
+    dayAfter.setDate(dayAfter.getDate() + 2);
+    return dayAfter.toISOString().split('T')[0];
+  }
+  
+  // Handle "in X days"
+  const inDaysMatch = lowerText.match(/^in (\d+) days?$/);
+  if (inDaysMatch) {
+    const days = parseInt(inDaysMatch[1]);
+    const futureDate = new Date(todayInTz);
+    futureDate.setDate(futureDate.getDate() + days);
+    return futureDate.toISOString().split('T')[0];
+  }
+  
+  // Handle "next Monday", "next Tuesday", etc.
+  const nextDayMatch = lowerText.match(/^next (monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/);
+  if (nextDayMatch) {
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const targetDay = dayNames.indexOf(nextDayMatch[1]);
+    const currentDay = todayInTz.getDay();
+    let daysToAdd = targetDay - currentDay;
+    if (daysToAdd <= 0) daysToAdd += 7; // Next week
+    const nextDay = new Date(todayInTz);
+    nextDay.setDate(nextDay.getDate() + daysToAdd);
+    return nextDay.toISOString().split('T')[0];
+  }
+  
+  // Handle absolute dates like "Jan 25", "January 25", "25 Jan", "25th January"
+  const currentYear = todayInTz.getFullYear();
+  const nextYear = currentYear + 1;
+  
+  // Month names for parsing
+  const monthNames: Record<string, number> = {
+    'jan': 0, 'january': 0,
+    'feb': 1, 'february': 1,
+    'mar': 2, 'march': 2,
+    'apr': 3, 'april': 3,
+    'may': 4,
+    'jun': 5, 'june': 5,
+    'jul': 6, 'july': 6,
+    'aug': 7, 'august': 7,
+    'sep': 8, 'september': 8,
+    'oct': 9, 'october': 9,
+    'nov': 10, 'november': 10,
+    'dec': 11, 'december': 11,
+  };
+  
+  // Try various date formats
+  // "Jan 25" or "January 25"
+  let match = lowerText.match(/^([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?$/);
+  if (match) {
+    const month = monthNames[match[1]];
+    const day = parseInt(match[2]);
+    if (month !== undefined && day >= 1 && day <= 31) {
+      let date = new Date(currentYear, month, day);
+      // If date is in the past, assume next year
+      if (date < todayInTz) {
+        date = new Date(nextYear, month, day);
+      }
+      return date.toISOString().split('T')[0];
+    }
+  }
+  
+  // "25 Jan" or "25th January"
+  match = lowerText.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)$/);
+  if (match) {
+    const day = parseInt(match[1]);
+    const month = monthNames[match[2]];
+    if (month !== undefined && day >= 1 && day <= 31) {
+      let date = new Date(currentYear, month, day);
+      if (date < todayInTz) {
+        date = new Date(nextYear, month, day);
+      }
+      return date.toISOString().split('T')[0];
+    }
+  }
+  
+  // "2026-01-25" (already in correct format)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateText)) {
+    return dateText;
+  }
+  
+  // If we can't parse it, return empty string
+  console.error(`Could not parse date: ${dateText}`);
+  return '';
+}
+
+/**
+ * Fetches upcoming flights for a flight number from FlightAware
+ */
+async function fetchUpcomingFlights(flightNumber: string): Promise<any[]> {
+  try {
+    // Fetch flights for the next 7 days
+    const url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}`;
+    console.log(`Fetching upcoming flights for ${flightNumber}`);
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'x-apikey': FLIGHTAWARE_API_KEY,
+        'Content-Type': 'application/json',
+      },
+    });
+    
+    if (!response.ok) {
+      console.error(`FlightAware API error: ${response.status} ${response.statusText}`);
+      return [];
+    }
+    
+    const data = await response.json() as { flights?: unknown[] };
+    return data.flights || [];
+  } catch (error) {
+    console.error('Error fetching flights from FlightAware:', error);
+    return [];
+  }
+}
+
+/**
+ * Validates a flight subscription request and returns flight details
+ */
+async function validateFlightSubscription(
+  request: SubscriptionRequest
+): Promise<FlightValidationResult> {
+  try {
+    // Fetch upcoming flights
+    const flights = await fetchUpcomingFlights(request.flight_number);
+    
+    if (!flights || flights.length === 0) {
+      return {
+        valid: false,
+        flight_number: request.flight_number,
+        date: '',
+        error: `Couldn't find any upcoming flights for ${request.flight_number}`,
+      };
+    }
+    
+    // Get departure timezone from first flight to resolve the date
+    const firstFlight = flights[0];
+    const departureTimezone = firstFlight.origin?.timezone || 'UTC';
+    
+    // Resolve the date text to an actual date
+    const resolvedDate = resolveDateInTimezone(request.date_text, departureTimezone);
+    
+    if (!resolvedDate) {
+      return {
+        valid: false,
+        flight_number: request.flight_number,
+        date: '',
+        error: `Couldn't understand the date "${request.date_text}"`,
+      };
+    }
+    
+    // Find the flight on the resolved date
+    const matchingFlight = flights.find((f: any) => {
+      const scheduledDeparture = f.scheduled_out || f.scheduled_off;
+      if (!scheduledDeparture) return false;
+      
+      // Format the departure date in the departure timezone
+      const depDate = new Date(scheduledDeparture);
+      const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: departureTimezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      });
+      const flightDate = formatter.format(depDate);
+      return flightDate === resolvedDate;
+    });
+    
+    if (!matchingFlight) {
+      return {
+        valid: false,
+        flight_number: request.flight_number,
+        date: resolvedDate,
+        error: `${request.flight_number} doesn't appear to operate on ${resolvedDate}. Please check the date.`,
+      };
+    }
+    
+    // Extract flight info
+    const depTime = matchingFlight.scheduled_out || matchingFlight.scheduled_off;
+    
+    return {
+      valid: true,
+      flight_number: request.flight_number,
+      date: resolvedDate,
+      fa_flight_id: matchingFlight.fa_flight_id,
+      departure_airport: matchingFlight.origin?.code_iata || matchingFlight.origin?.code,
+      departure_city: matchingFlight.origin?.city,
+      arrival_airport: matchingFlight.destination?.code_iata || matchingFlight.destination?.code,
+      arrival_city: matchingFlight.destination?.city,
+      departure_time: depTime,
+      departure_timezone: departureTimezone,
+    };
+  } catch (error) {
+    console.error('Error validating flight:', error);
+    return {
+      valid: false,
+      flight_number: request.flight_number,
+      date: '',
+      error: 'Error validating flight. Please try again.',
+    };
+  }
+}
+
+/**
+ * Checks if user already has a subscription for a flight
+ */
+async function checkExistingSubscription(
+  phone: string,
+  flightNumber: string,
+  date: string
+): Promise<boolean> {
+  try {
+    const result = await docClient.send(new GetCommand({
+      TableName: APP_TABLE_NAME,
+      Key: {
+        PK: `USER#${phone}`,
+        SK: `SUB#${date}#${flightNumber}`,
+      },
+    }));
+    
+    if (result.Item) {
+      const status = (result.Item.status as string || '').toUpperCase();
+      return status === 'ACTIVE';
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Error checking existing subscription:', error);
+    return false;
+  }
+}
+
+/**
+ * Creates a flight subscription for a user
+ */
+async function createSubscription(
+  phone: string,
+  flightInfo: FlightValidationResult
+): Promise<boolean> {
+  try {
+    const now = new Date().toISOString();
+    
+    await docClient.send(new PutCommand({
+      TableName: APP_TABLE_NAME,
+      Item: {
+        PK: `USER#${phone}`,
+        SK: `SUB#${flightInfo.date}#${flightInfo.flight_number}`,
+        GSI1PK: `FLIGHT#${flightInfo.flight_number}#${flightInfo.date}`,
+        GSI1SK: `USER#${phone}`,
+        flight_number: flightInfo.flight_number,
+        date: flightInfo.date,
+        fa_flight_id: flightInfo.fa_flight_id,
+        status: 'ACTIVE',
+        created_at: now,
+        updated_at: now,
+      },
+    }));
+    
+    console.log(`Created subscription for ${phone}: ${flightInfo.flight_number} on ${flightInfo.date}`);
+    return true;
+  } catch (error) {
+    console.error('Error creating subscription:', error);
+    return false;
+  }
+}
+
+/**
+ * Handles a subscription request from WhatsApp
+ */
+async function handleSubscriptionRequest(
+  phone: string,
+  flights: SubscriptionRequest[]
+): Promise<string> {
+  const results: SubscriptionResult[] = [];
+  
+  for (const request of flights) {
+    // Validate the flight
+    const validation = await validateFlightSubscription(request);
+    
+    if (!validation.valid) {
+      results.push({
+        success: false,
+        flight_number: request.flight_number,
+        date: validation.date || request.date_text,
+        message: validation.error || 'Flight not found',
+      });
+      continue;
+    }
+    
+    // Check for existing subscription
+    const exists = await checkExistingSubscription(phone, validation.flight_number, validation.date);
+    if (exists) {
+      results.push({
+        success: false,
+        flight_number: validation.flight_number,
+        date: validation.date,
+        message: `You're already tracking ${validation.flight_number} on ${formatDateForDisplay(validation.date)}!`,
+      });
+      continue;
+    }
+    
+    // Create the subscription
+    const created = await createSubscription(phone, validation);
+    if (created) {
+      results.push({
+        success: true,
+        flight_number: validation.flight_number,
+        date: validation.date,
+        message: 'Success',
+        flight_info: validation,
+      });
+    } else {
+      results.push({
+        success: false,
+        flight_number: validation.flight_number,
+        date: validation.date,
+        message: 'Error creating subscription. Please try again.',
+      });
+    }
+  }
+  
+  // Format the response message
+  return formatSubscriptionResponse(results);
+}
+
+/**
+ * Formats a date for user-friendly display (e.g., "Jan 25, 2026")
+ */
+function formatDateForDisplay(dateStr: string): string {
+  try {
+    const date = new Date(dateStr + 'T00:00:00');
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+/**
+ * Formats departure time for display (e.g., "9:50 PM CET")
+ */
+function formatDepartureTimeForDisplay(isoTime: string, timezone: string): string {
+  try {
+    const date = new Date(isoTime);
+    const timeStr = date.toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+      timeZone: timezone,
+    });
+    
+    // Get timezone abbreviation
+    const tzFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      timeZoneName: 'short',
+    });
+    const parts = tzFormatter.formatToParts(date);
+    const tzAbbr = parts.find(p => p.type === 'timeZoneName')?.value || '';
+    
+    return `${timeStr} ${tzAbbr}`;
+  } catch {
+    return isoTime;
+  }
+}
+
+/**
+ * Formats the subscription response message
+ */
+function formatSubscriptionResponse(results: SubscriptionResult[]): string {
+  const successes = results.filter(r => r.success);
+  const failures = results.filter(r => !r.success);
+  
+  const lines: string[] = [];
+  
+  if (successes.length > 0) {
+    if (successes.length === 1) {
+      const s = successes[0];
+      const info = s.flight_info!;
+      lines.push(`✅ Now tracking ${s.flight_number}`);
+      lines.push('');
+      lines.push(`${info.departure_city || info.departure_airport} → ${info.arrival_city || info.arrival_airport}`);
+      lines.push(`${formatDateForDisplay(s.date)} • Departs ${formatDepartureTimeForDisplay(info.departure_time!, info.departure_timezone!)}`);
+    } else {
+      lines.push(`✅ Now tracking ${successes.length} flights!`);
+      lines.push('');
+      successes.forEach((s, i) => {
+        const info = s.flight_info!;
+        lines.push(`${i + 1}. ${s.flight_number} ${info.departure_airport} → ${info.arrival_airport}`);
+        lines.push(`   ${formatDateForDisplay(s.date)} • Departs ${formatDepartureTimeForDisplay(info.departure_time!, info.departure_timezone!)}`);
+      });
+    }
+    lines.push('');
+    lines.push("I'll send you updates about delays, gate changes, and more.");
+  }
+  
+  if (failures.length > 0) {
+    if (successes.length > 0) {
+      lines.push('');
+      lines.push('---');
+      lines.push('');
+    }
+    
+    for (const f of failures) {
+      lines.push(`❌ ${f.flight_number}: ${f.message}`);
+    }
+  }
+  
+  return lines.join('\n');
 }
 
 /**
@@ -391,6 +906,24 @@ const SYSTEM_PROMPT = `You are Flait, a friendly and helpful flight assistant on
 CURRENT USER'S FLIGHTS:
 {flight_context}
 
+SUBSCRIPTION INTENT DETECTION (CRITICAL):
+If the user wants to TRACK, ADD, SUBSCRIBE to, or FOLLOW a flight, you MUST respond with ONLY this JSON format and nothing else:
+{"intent":"subscribe","flights":[{"flight_number":"XX123","date_text":"tomorrow"}]}
+
+Examples of subscription requests:
+- "Track KL880 tomorrow" → {"intent":"subscribe","flights":[{"flight_number":"KL880","date_text":"tomorrow"}]}
+- "Add flight UA123 on Jan 25" → {"intent":"subscribe","flights":[{"flight_number":"UA123","date_text":"Jan 25"}]}
+- "Follow BA456 next Monday" → {"intent":"subscribe","flights":[{"flight_number":"BA456","date_text":"next Monday"}]}
+- "Track KL880 tomorrow and KL881 on Jan 26" → {"intent":"subscribe","flights":[{"flight_number":"KL880","date_text":"tomorrow"},{"flight_number":"KL881","date_text":"Jan 26"}]}
+
+IMPORTANT for subscriptions:
+- Extract the EXACT flight number (letters + numbers, e.g., KL880, UA123, BA456)
+- Extract the date_text EXACTLY as the user said it (e.g., "tomorrow", "Jan 25", "next Monday", "in 3 days")
+- If multiple flights, include all of them in the flights array
+- ONLY output the JSON, no other text, no markdown formatting
+
+For ALL OTHER messages (questions, greetings, etc.), respond normally with text.
+
 IMPORTANT - PRE-COMPUTED VALUES:
 - All times are ALREADY converted to local timezone - use them exactly as shown
 - "Time Until Departure" is already calculated - use this value directly
@@ -401,7 +934,7 @@ IMPORTANT - PRE-COMPUTED VALUES:
 FLIGHT QUESTIONS:
 - For flight questions, ALWAYS use the provided flight data - don't make up information
 - If you don't have flight data for what they're asking, say so politely
-- If the user has no flights tracked, encourage them to subscribe to a flight first
+- If the user has no flights tracked, let them know they can say "Track [flight] [date]" to add one
 - Be proactive - if Phase is "Boarding" or "Go to Gate", emphasize urgency
 
 TRAVEL KNOWLEDGE:
@@ -910,14 +1443,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     await saveConversationMessage(phone, 'user', question);
 
     // Ask Gemini with conversation history
-    const response = await askGemini(question, flightContexts, conversationHistory);
-    console.log(`Gemini response length: ${response.length} chars`);
+    const geminiResponse = await askGemini(question, flightContexts, conversationHistory);
+    console.log(`Gemini response length: ${geminiResponse.length} chars`);
+
+    // Parse the response to check for subscription intent
+    const parsed = parseGeminiResponse(geminiResponse);
+    
+    let finalResponse: string;
+    
+    if (parsed.intent === 'subscribe' && parsed.flights && parsed.flights.length > 0) {
+      // Handle subscription request
+      console.log(`Detected subscription intent for ${parsed.flights.length} flight(s)`);
+      finalResponse = await handleSubscriptionRequest(phone, parsed.flights);
+    } else {
+      // Regular query response
+      finalResponse = parsed.text || geminiResponse;
+    }
 
     // Save assistant's response to conversation history
-    await saveConversationMessage(phone, 'assistant', response);
+    await saveConversationMessage(phone, 'assistant', finalResponse);
 
     // Send response
-    await sendWhatsAppMessage(phone, response);
+    await sendWhatsAppMessage(phone, finalResponse);
 
     // Add remaining queries info if low
     if (rateLimit.remaining <= 5 && rateLimit.remaining > 0) {
