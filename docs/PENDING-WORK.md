@@ -1,6 +1,6 @@
 # Pending Work - FLAIT
 
-Last updated: 2026-01-21 (night)
+Last updated: 2026-01-22
 
 ## Overview
 
@@ -22,11 +22,12 @@ When departure time changes by >30 minutes, flight-tracker automatically trigger
 **Status:** Implemented  
 **Completed:** 2026-01-21
 
-Users can now send WhatsApp messages to the Flait number and receive intelligent responses powered by Gemini 2.0 Flash. The assistant (named "Flait") answers questions about tracked flights and general travel queries.
+Users can now send WhatsApp messages to the Flait number and receive intelligent responses powered by Gemini 3 Flash Preview. The assistant (named "Flait") answers questions about tracked flights and general travel queries.
 
 **Features:**
-- Natural language understanding via Gemini 2.0 Flash
+- Natural language understanding via Gemini 3 Flash Preview (4096 token output)
 - Flight context awareness (pulls user's subscriptions and current flight data)
+- Pre-computed local times, flight phases, and connection analysis for accurate responses
 - Travel assistant personality for general questions
 - Rate limiting (20 queries/hour per user)
 - Graceful error handling
@@ -180,6 +181,17 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 ### 5. WhatsApp Template Messages
 **Description:** Register pre-approved WhatsApp templates for proactive notifications outside the 24-hour window.
 
+### 6. Conversation Memory for WhatsApp Queries
+**Description:** Add conversation history to enable follow-up questions in WhatsApp.
+
+**Current Issue:** Each WhatsApp message is stateless - Flait has no memory of previous messages in the conversation.
+
+**Implementation Plan:**
+- Store last 5-10 messages per user in DynamoDB with 1-hour TTL
+- Schema: `PK: CONV#{phone}`, `SK: {timestamp}`, `role: user|assistant`
+- Pass conversation history to Gemini for context-aware responses
+- Example: "What's my flight status?" → "What about the gate?" (second message needs context)
+
 ---
 
 ## Completed Features ✓
@@ -198,8 +210,10 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 - [x] City names in route display
 - [x] Precise flight tracking with `fa_flight_id` (prevents wrong flight data as time passes)
 - [x] Schedule recalculation on delay (>30 min departure change triggers schedule rebuild)
-- [x] WhatsApp on-demand query interface with Gemini 2.0 Flash LLM
+- [x] WhatsApp on-demand query interface with Gemini 3 Flash Preview LLM
 - [x] Rate limiting for WhatsApp queries (20/hour)
+- [x] Pre-computed local times, flight phases, and connection analysis for LLM context
+- [x] Time change notifications with old→new format and difference (e.g., "07:45 → 08:27 (+42m)")
 
 ---
 
