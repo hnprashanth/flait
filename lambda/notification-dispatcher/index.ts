@@ -64,6 +64,7 @@ interface FlightStatus {
   gate_destination?: string;
   terminal_origin?: string;
   terminal_destination?: string;
+  baggage_claim?: string;
 }
 
 interface Subscription {
@@ -423,6 +424,7 @@ function generateMilestoneMessage(
       lines.push(`Your flight ${flightNumber} is approaching ${arrivalLocation || 'destination'}.`);
       lines.push(`Expected arrival: ${arrivalTime}`);
       if (status.gate_destination) lines.push(`Arrival gate: ${status.gate_destination}`);
+      if (status.baggage_claim) lines.push(`Baggage claim: ${status.baggage_claim}`);
       break;
   }
 
@@ -479,6 +481,17 @@ function generateChangeMessage(
 
   if (changes.gate_destination) {
     lines.push(`Arrival gate: *${changes.gate_destination.new}*`);
+    hasSpecificChanges = true;
+  }
+
+  if (changes.baggage_claim) {
+    if (changes.baggage_claim.old) {
+      lines.push(`Baggage claim changed: ${changes.baggage_claim.old} → *${changes.baggage_claim.new}*`);
+    } else {
+      lines.push(`Baggage claim: *${changes.baggage_claim.new}*`);
+      if (status.terminal_destination) lines.push(`Terminal: ${status.terminal_destination}`);
+      if (status.gate_destination) lines.push(`Arrival gate: ${status.gate_destination}`);
+    }
     hasSpecificChanges = true;
   }
 

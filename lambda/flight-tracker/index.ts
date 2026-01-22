@@ -352,7 +352,8 @@ function compareFlightData(oldData: Record<string, any>, newData: FlightAwareRes
     'departure_airport',
     'arrival_airport',
     'gate_origin',
-    'gate_destination'
+    'gate_destination',
+    'baggage_claim'
   ];
 
   // If we don't have old data, everything is new, but we might not want to alert on initial creation
@@ -689,6 +690,9 @@ function extractFlightFields(flightData: FlightAwareResponse): Record<string, an
     
     // Inbound aircraft tracking - the flight ID of the aircraft's previous leg
     if ('inbound_fa_flight_id' in data) result.inbound_fa_flight_id = data.inbound_fa_flight_id;
+    
+    // Baggage claim belt assignment
+    if ('baggage_claim' in data) result.baggage_claim = data.baggage_claim;
   }
   
   return result;
