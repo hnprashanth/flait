@@ -56,6 +56,14 @@ interface FlightContext {
   arrival_local?: string;
   departure_timezone?: string;
   arrival_timezone?: string;
+  // Inbound aircraft tracking
+  inbound_flight_number?: string;
+  inbound_origin?: string;
+  inbound_origin_city?: string;
+  inbound_status?: string;
+  inbound_estimated_arrival?: string;
+  inbound_actual_arrival?: string;
+  inbound_delay_minutes?: number;
 }
 
 // --- Airport Timezone Map (common airports) ---
@@ -581,6 +589,14 @@ async function getFlightData(flightNumber: string, date: string): Promise<Flight
       terminal_destination: item.terminal_destination,
       baggage_claim: item.baggage_claim,
       aircraft_type: item.aircraft_type,
+      // Inbound aircraft tracking
+      inbound_flight_number: item.inbound_flight_number,
+      inbound_origin: item.inbound_origin,
+      inbound_origin_city: item.inbound_origin_city,
+      inbound_status: item.inbound_status,
+      inbound_estimated_arrival: item.inbound_estimated_arrival,
+      inbound_actual_arrival: item.inbound_actual_arrival,
+      inbound_delay_minutes: item.inbound_delay_minutes,
     };
   } catch (error) {
     console.error(`Error fetching flight data for ${flightNumber} on ${date}:`, error);
@@ -648,6 +664,27 @@ function formatFlightContext(flights: FlightContext[]): string {
     }
     if (f.aircraft_type) {
       lines.push(`  Aircraft: ${f.aircraft_type}`);
+    }
+    
+    // Inbound aircraft info (if available)
+    if (f.inbound_flight_number) {
+      lines.push('');
+      lines.push('  INBOUND AIRCRAFT:');
+      lines.push(`    Flight: ${f.inbound_flight_number} from ${f.inbound_origin_city || f.inbound_origin}`);
+      lines.push(`    Status: ${f.inbound_status}`);
+      if (f.inbound_delay_minutes && f.inbound_delay_minutes > 0) {
+        const delayHours = Math.floor(f.inbound_delay_minutes / 60);
+        const delayMins = f.inbound_delay_minutes % 60;
+        const delayStr = delayHours > 0 ? `${delayHours}h ${delayMins}m` : `${delayMins}m`;
+        lines.push(`    Delay: ${delayStr} late`);
+      }
+      if (f.inbound_actual_arrival) {
+        const arrivalLocal = formatLocalTime(f.inbound_actual_arrival, f.departure_airport);
+        lines.push(`    Arrived: ${arrivalLocal || f.inbound_actual_arrival}`);
+      } else if (f.inbound_estimated_arrival) {
+        const arrivalLocal = formatLocalTime(f.inbound_estimated_arrival, f.departure_airport);
+        lines.push(`    Expected: ${arrivalLocal || f.inbound_estimated_arrival}`);
+      }
     }
 
     return lines.join('\n');

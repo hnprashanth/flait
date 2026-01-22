@@ -15,12 +15,23 @@ let twilioClient: ReturnType<typeof twilio> | null = null;
 // --- Type Definitions ---
 
 type MilestoneType = 'checkin' | '24h' | '12h' | '4h' | 'boarding' | 'pre-landing';
-type UpdateType = 'milestone' | 'change' | 'combined';
+type UpdateType = 'milestone' | 'change' | 'combined' | 'inbound-delay' | 'inbound-landed';
 type RiskLevel = 'safe' | 'moderate' | 'tight' | 'critical';
 
 interface FlightChange {
   old: unknown;
   new: unknown;
+}
+
+interface InboundFlightInfo {
+  flight_number: string;
+  origin: string;
+  origin_city?: string;
+  status: string;
+  scheduled_arrival?: string;
+  estimated_arrival?: string;
+  actual_arrival?: string;
+  delay_minutes: number;
 }
 
 interface FlightUpdateEvent {
@@ -30,6 +41,7 @@ interface FlightUpdateEvent {
   milestone?: MilestoneType;
   changes?: Record<string, FlightChange>;
   current_status: FlightStatus;
+  inbound_info?: InboundFlightInfo;
 }
 
 interface FlightStatus {
@@ -309,7 +321,7 @@ function generateNotificationMessage(
   update: FlightUpdateEvent,
   tripContext: TripContext
 ): string | null {
-  const { flight_number, update_type, milestone, changes, current_status } = update;
+  const { flight_number, update_type, milestone, changes, current_status, inbound_info } = update;
 
   // Find relevant connection for this flight
   const relevantConnection = tripContext.connections.find(
@@ -327,6 +339,12 @@ function generateNotificationMessage(
       break;
     case 'combined':
       message = generateCombinedMessage(flight_number, milestone!, changes!, current_status, relevantConnection);
+      break;
+    case 'inbound-delay':
+      message = generateInboundDelayMessage(flight_number, inbound_info!, current_status);
+      break;
+    case 'inbound-landed':
+      message = generateInboundLandedMessage(flight_number, inbound_info!, current_status);
       break;
     default:
       return null;
@@ -585,6 +603,76 @@ function formatConnectionInfo(connection: ConnectionAnalysis, milestone?: Milest
     lines.push(`Next gate: ${connection.toGate}`);
   }
 
+  return lines.join('\n');
+}
+
+/**
+ * Generates message for inbound aircraft delay.
+ */
+function generateInboundDelayMessage(
+  flightNumber: string,
+  inboundInfo: InboundFlightInfo,
+  status: FlightStatus
+): string {
+  const lines: string[] = [];
+  
+  lines.push(`⚠️ *Inbound Aircraft Update: ${flightNumber}*`);
+  lines.push('');
+  lines.push(`Your aircraft is on its way from ${inboundInfo.origin_city || inboundInfo.origin} as flight ${inboundInfo.flight_number}.`);
+  lines.push('');
+  
+  lines.push(`Status: *${inboundInfo.status}*`);
+  
+  const arrivalTime = inboundInfo.estimated_arrival || inboundInfo.scheduled_arrival;
+  if (arrivalTime) {
+    lines.push(`Expected at ${status.departure_airport || 'airport'}: *${formatTime(arrivalTime, status.departure_timezone)}*`);
+  }
+  
+  // Format delay nicely
+  const delayHours = Math.floor(inboundInfo.delay_minutes / 60);
+  const delayMins = inboundInfo.delay_minutes % 60;
+  let delayStr = '';
+  if (delayHours > 0) {
+    delayStr = `${delayHours}h ${delayMins}m`;
+  } else {
+    delayStr = `${delayMins} minutes`;
+  }
+  lines.push(`Current delay: *${delayStr} late*`);
+  
+  lines.push('');
+  lines.push('This may affect your departure. We\'ll keep you updated.');
+  
+  return lines.join('\n');
+}
+
+/**
+ * Generates message for inbound aircraft landed.
+ */
+function generateInboundLandedMessage(
+  flightNumber: string,
+  inboundInfo: InboundFlightInfo,
+  status: FlightStatus
+): string {
+  const lines: string[] = [];
+  
+  lines.push(`✅ *Good news for ${flightNumber}!*`);
+  lines.push('');
+  lines.push(`Your aircraft has landed at ${status.departure_airport || 'the airport'} from ${inboundInfo.origin_city || inboundInfo.origin} (flight ${inboundInfo.flight_number}).`);
+  lines.push('');
+  
+  if (inboundInfo.actual_arrival) {
+    lines.push(`Arrived: ${formatTime(inboundInfo.actual_arrival, status.departure_timezone)}`);
+  }
+  
+  lines.push('');
+  lines.push('The crew will now prepare for your flight.');
+  
+  // Add scheduled departure reminder
+  const departureTime = status.estimated_departure || status.scheduled_departure;
+  if (departureTime) {
+    lines.push(`Your scheduled departure: ${formatTime(departureTime, status.departure_timezone)}`);
+  }
+  
   return lines.join('\n');
 }
 

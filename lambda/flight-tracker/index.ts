@@ -51,11 +51,29 @@ interface FlightChange {
 interface FlightUpdateEvent {
   flight_number: string;
   date: string;
-  update_type: 'milestone' | 'change' | 'combined';
+  update_type: 'milestone' | 'change' | 'combined' | 'inbound-delay' | 'inbound-landed';
   milestone?: MilestoneType;
   changes?: Record<string, FlightChange>;
   current_status: Record<string, unknown>;
+  inbound_info?: InboundFlightInfo;
 }
+
+/** Inbound aircraft flight information */
+interface InboundFlightInfo {
+  flight_number: string;       // e.g., "KL879"
+  origin: string;              // e.g., "JFK"
+  origin_city?: string;        // e.g., "New York"
+  status: string;              // e.g., "In Flight", "Landed"
+  scheduled_arrival?: string;  // Scheduled arrival at user's departure airport
+  estimated_arrival?: string;  // Estimated arrival
+  actual_arrival?: string;     // Actual arrival (if landed)
+  delay_minutes: number;       // Delay in minutes (0 if on time or early)
+}
+
+/** Constants for inbound tracking */
+const INBOUND_CHECK_HOURS_BEFORE_DEPARTURE = 5;
+const INBOUND_DELAY_ALERT_THRESHOLD_MINUTES = 30;
+const INBOUND_DELAY_CHANGE_THRESHOLD_MINUTES = 15;
 
 /**
  * Fetches flight information from FlightAware AeroAPI v4
@@ -105,6 +123,120 @@ async function fetchFlightInfo(flightNumber: string, date: string, faFlightId?: 
   // Adjust this based on actual API response structure
   // The response structure will vary based on the endpoint used
   return data;
+}
+
+/**
+ * Fetches inbound aircraft flight information.
+ * The inbound flight is the aircraft's previous leg before operating the user's flight.
+ * 
+ * @param inboundFaFlightId - The FlightAware unique ID for the inbound flight
+ * @returns InboundFlightInfo or null if unable to fetch
+ */
+async function fetchInboundFlightInfo(inboundFaFlightId: string): Promise<InboundFlightInfo | null> {
+  try {
+    console.log(`Fetching inbound flight info for: ${inboundFaFlightId}`);
+    
+    // Fetch inbound flight data using the fa_flight_id
+    const inboundData = await fetchFlightInfo('', '', inboundFaFlightId);
+    const extracted = extractFlightFields(inboundData);
+    
+    if (!extracted.flight_ident) {
+      console.log('Could not extract inbound flight info');
+      return null;
+    }
+    
+    // Calculate delay in minutes
+    let delayMinutes = 0;
+    const scheduledArrival = extracted.scheduled_arrival;
+    const estimatedArrival = extracted.estimated_arrival;
+    const actualArrival = extracted.actual_arrival;
+    
+    if (scheduledArrival) {
+      const scheduled = new Date(scheduledArrival).getTime();
+      const actual = actualArrival 
+        ? new Date(actualArrival).getTime()
+        : estimatedArrival 
+          ? new Date(estimatedArrival).getTime()
+          : scheduled;
+      
+      delayMinutes = Math.max(0, Math.round((actual - scheduled) / (1000 * 60)));
+    }
+    
+    // Determine status - normalize various FlightAware status strings
+    let status = extracted.status || 'Unknown';
+    if (actualArrival || status.toLowerCase().includes('landed') || status.toLowerCase().includes('arrived')) {
+      status = 'Landed';
+    } else if (extracted.actual_departure || status.toLowerCase().includes('en route') || status.toLowerCase().includes('in air')) {
+      status = 'In Flight';
+    } else if (status.toLowerCase().includes('scheduled')) {
+      status = 'Scheduled';
+    }
+    
+    return {
+      flight_number: extracted.flight_ident,
+      origin: extracted.departure_airport || 'Unknown',
+      origin_city: extracted.departure_city,
+      status,
+      scheduled_arrival: scheduledArrival,
+      estimated_arrival: estimatedArrival,
+      actual_arrival: actualArrival,
+      delay_minutes: delayMinutes,
+    };
+  } catch (error) {
+    console.error('Error fetching inbound flight info:', error);
+    return null;
+  }
+}
+
+/**
+ * Checks if inbound flight tracking should be performed based on time to departure.
+ * Only check within 5 hours of departure to avoid unnecessary API calls.
+ */
+function shouldCheckInbound(departureTime: string | undefined): boolean {
+  if (!departureTime) return false;
+  
+  const now = Date.now();
+  const departure = new Date(departureTime).getTime();
+  const hoursUntilDeparture = (departure - now) / (1000 * 60 * 60);
+  
+  return hoursUntilDeparture > 0 && hoursUntilDeparture <= INBOUND_CHECK_HOURS_BEFORE_DEPARTURE;
+}
+
+/**
+ * Determines if an inbound delay alert should be sent based on:
+ * - Delay exceeds threshold (30 min)
+ * - Delay changed significantly since last alert (+15 min)
+ */
+function shouldAlertInboundDelay(
+  currentDelayMinutes: number,
+  previousAlertedDelayMinutes: number | undefined
+): boolean {
+  // Must exceed minimum threshold
+  if (currentDelayMinutes < INBOUND_DELAY_ALERT_THRESHOLD_MINUTES) {
+    return false;
+  }
+  
+  // First alert - delay just crossed threshold
+  if (previousAlertedDelayMinutes === undefined) {
+    return true;
+  }
+  
+  // Alert if delay increased by threshold amount
+  const delayIncrease = currentDelayMinutes - previousAlertedDelayMinutes;
+  return delayIncrease >= INBOUND_DELAY_CHANGE_THRESHOLD_MINUTES;
+}
+
+/**
+ * Determines if an inbound landed alert should be sent.
+ */
+function shouldAlertInboundLanded(
+  currentStatus: string,
+  previousStatus: string | undefined
+): boolean {
+  const isLanded = currentStatus === 'Landed';
+  const wasNotLanded = previousStatus !== 'Landed';
+  
+  return isLanded && wasNotLanded;
 }
 
 /**
@@ -383,6 +515,44 @@ async function publishFlightUpdate(
 }
 
 /**
+ * Publishes an inbound flight event (delay or landed) to EventBridge.
+ */
+async function publishInboundEvent(
+  flightNumber: string,
+  date: string,
+  updateType: 'inbound-delay' | 'inbound-landed',
+  inboundInfo: InboundFlightInfo,
+  flightData: Record<string, unknown>
+): Promise<void> {
+  const eventDetail: FlightUpdateEvent = {
+    flight_number: flightNumber,
+    date: date,
+    update_type: updateType,
+    current_status: flightData,
+    inbound_info: inboundInfo,
+  };
+
+  console.log(`Publishing ${updateType} event for ${flightNumber}:`, {
+    inbound_flight: inboundInfo.flight_number,
+    inbound_status: inboundInfo.status,
+    delay_minutes: inboundInfo.delay_minutes,
+  });
+
+  const entry = {
+    Source: 'com.flait.flight-tracker',
+    DetailType: 'FlightUpdate',
+    Detail: JSON.stringify(eventDetail),
+    EventBusName: EVENT_BUS_NAME,
+  };
+
+  await eventBridgeClient.send(new PutEventsCommand({
+    Entries: [entry],
+  }));
+
+  console.log(`Published ${updateType} event to EventBridge`);
+}
+
+/**
  * Stores flight data in DynamoDB with milestone tracking
  * @param flightNumber - Flight identifier
  * @param date - Flight date
@@ -393,7 +563,8 @@ async function storeFlightData(
   flightNumber: string,
   date: string,
   flightData: FlightAwareResponse,
-  milestonesSent: MilestoneType[] = []
+  milestonesSent: MilestoneType[] = [],
+  additionalFields: Record<string, unknown> = {}
 ): Promise<void> {
   const partitionKey = `${flightNumber}#${date}`;
   const sortKey = new Date().toISOString(); // created_at timestamp
@@ -408,6 +579,8 @@ async function storeFlightData(
     milestones_sent: milestonesSent,
     // Store individual fields for easier querying if needed
     ...extractFlightFields(flightData),
+    // Include any additional fields (like inbound tracking data)
+    ...additionalFields,
   };
 
   await docClient.send(
@@ -513,6 +686,9 @@ function extractFlightFields(flightData: FlightAwareResponse): Record<string, an
 
     // FlightAware unique flight ID - critical for precise tracking
     if ('fa_flight_id' in data) result.fa_flight_id = data.fa_flight_id;
+    
+    // Inbound aircraft tracking - the flight ID of the aircraft's previous leg
+    if ('inbound_fa_flight_id' in data) result.inbound_fa_flight_id = data.inbound_fa_flight_id;
   }
   
   return result;
@@ -669,6 +845,62 @@ export const handler = async (
       }
     }
 
+    // --- Inbound Aircraft Tracking ---
+    // Only check within 5 hours of departure to avoid unnecessary API calls
+    let inboundInfo: InboundFlightInfo | null = null;
+    const inboundFaFlightId = extractedFields.inbound_fa_flight_id as string | undefined;
+    const departureTimeStr = (extractedFields.estimated_departure || extractedFields.scheduled_departure) as string | undefined;
+    
+    if (inboundFaFlightId && shouldCheckInbound(departureTimeStr)) {
+      console.log(`Checking inbound aircraft for ${body.flight_number} (inbound_fa_flight_id: ${inboundFaFlightId})`);
+      
+      inboundInfo = await fetchInboundFlightInfo(inboundFaFlightId);
+      
+      if (inboundInfo) {
+        console.log(`Inbound flight ${inboundInfo.flight_number}: status=${inboundInfo.status}, delay=${inboundInfo.delay_minutes}min`);
+        
+        // Get previous inbound state from old record
+        const previousInboundStatus = oldRecord?.inbound_status as string | undefined;
+        const previousInboundAlertedDelay = oldRecord?.inbound_alerted_delay_minutes as number | undefined;
+        
+        // Check if we should alert for inbound delay
+        if (shouldAlertInboundDelay(inboundInfo.delay_minutes, previousInboundAlertedDelay)) {
+          console.log(`Inbound delay alert triggered: ${inboundInfo.delay_minutes}min (previous alerted: ${previousInboundAlertedDelay || 'none'})`);
+          await publishInboundEvent(
+            body.flight_number,
+            body.date,
+            'inbound-delay',
+            inboundInfo,
+            extractedFields
+          );
+          // Update the alerted delay for next comparison
+          extractedFields.inbound_alerted_delay_minutes = inboundInfo.delay_minutes;
+        }
+        
+        // Check if we should alert for inbound landed
+        if (shouldAlertInboundLanded(inboundInfo.status, previousInboundStatus)) {
+          console.log(`Inbound landed alert triggered: ${inboundInfo.flight_number} has landed`);
+          await publishInboundEvent(
+            body.flight_number,
+            body.date,
+            'inbound-landed',
+            inboundInfo,
+            extractedFields
+          );
+        }
+        
+        // Store inbound info for next comparison and WhatsApp queries
+        extractedFields.inbound_flight_number = inboundInfo.flight_number;
+        extractedFields.inbound_origin = inboundInfo.origin;
+        extractedFields.inbound_origin_city = inboundInfo.origin_city;
+        extractedFields.inbound_status = inboundInfo.status;
+        extractedFields.inbound_estimated_arrival = inboundInfo.estimated_arrival;
+        extractedFields.inbound_actual_arrival = inboundInfo.actual_arrival;
+        extractedFields.inbound_delay_minutes = inboundInfo.delay_minutes;
+        extractedFields.inbound_last_checked = new Date().toISOString();
+      }
+    }
+
     // Publish combined event if there are changes OR milestones
     if (Object.keys(changes).length > 0 || newMilestones.length > 0) {
       await publishFlightUpdate(
@@ -680,9 +912,9 @@ export const handler = async (
       );
     }
 
-    // Store in DynamoDB with updated milestones
+    // Store in DynamoDB with updated milestones and inbound data
     const allMilestones = [...previousMilestones, ...newMilestones.map(m => m.milestone)];
-    await storeFlightData(body.flight_number, body.date, flightData, allMilestones);
+    await storeFlightData(body.flight_number, body.date, flightData, allMilestones, extractedFields);
     console.log(`Successfully stored flight data for ${body.flight_number} on ${body.date}`);
 
     // Return response based on invocation type
