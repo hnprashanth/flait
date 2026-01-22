@@ -103,15 +103,17 @@ Users can subscribe to flights via natural language in WhatsApp.
 
 ---
 
-### 7. Baggage Belt Information
-**Status:** Not Implemented  
-**Effort:** Medium  
-**Description:** Notify users which baggage carousel to go to upon arrival.
+### ~~7. Baggage Belt Information~~ ✅ COMPLETED
+**Status:** Implemented  
+**Completed:** 2026-01-22
 
-**Implementation Notes:**
-- FlightAware may not provide this
-- May need airport-specific APIs or manual data
-- Could be added to pre-landing summary
+Notify users which baggage carousel to go to upon arrival.
+
+**Features:**
+- Baggage claim included in pre-landing notification (if available)
+- Sends notification when baggage belt is assigned (with terminal and gate info)
+- Sends notification when baggage belt changes (e.g., "Belt 3A → Belt 5B")
+- Uses `baggage_claim` field from FlightAware API
 
 ---
 
@@ -242,6 +244,7 @@ Users can subscribe to flights via natural language in WhatsApp.
 - [x] Conversation memory for WhatsApp follow-up questions (10 messages, 1-hour TTL)
 - [x] Inbound aircraft tracking with delay and landed alerts
 - [x] WhatsApp flight subscription via natural language ("Track KL880 tomorrow")
+- [x] Baggage belt notifications (in pre-landing, on assignment, on change)
 
 ---
 
