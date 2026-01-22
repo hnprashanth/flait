@@ -36,23 +36,50 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 3. Inbound Aircraft Tracking
-**Status:** Not Implemented  
-**Effort:** High  
-**Description:** Track the aircraft that will operate your flight. If the inbound flight is delayed, predict delay for your flight before it's officially announced.
+### ~~3. Inbound Aircraft Tracking~~ ✅ COMPLETED
+**Status:** Implemented  
+**Completed:** 2026-01-22
 
-**Implementation Notes:**
-- FlightAware API provides `inbound_fa_flight_id` field
-- Need to track the inbound flight and correlate delays
-- Proactively warn users: "Your aircraft is running 30 min late on its previous leg"
+Track the aircraft's previous flight leg to proactively warn users about potential delays.
 
-**PRD Reference:** FLAIT-Assistant-in-the-Air.md → Before Checkin
+**Features:**
+- Extracts `inbound_fa_flight_id` from FlightAware API
+- Checks inbound flight status within 5 hours of departure
+- Sends delay alerts when inbound delay > 30 min (re-alerts on +15 min increases)
+- Sends "inbound landed" alert when aircraft arrives
+- Inbound info included in WhatsApp query context
+
+**Notifications:**
+- "⚠️ Your aircraft is running 45 min late on its previous flight from JFK"
+- "✅ Good news! Your aircraft has landed at AMS"
+
+---
+
+### ~~4. WhatsApp Flight Subscription~~ ✅ COMPLETED
+**Status:** Implemented  
+**Completed:** 2026-01-22
+
+Users can subscribe to flights via natural language in WhatsApp.
+
+**Supported formats:**
+- "Track KL880 tomorrow"
+- "Add flight UA123 on Jan 25"
+- "Track KL880 tomorrow and KL881 on Jan 26"
+
+**Features:**
+- Natural language parsing via Gemini
+- Relative dates: "tomorrow", "next Monday", "in 3 days"
+- Absolute dates: "Jan 25", "25th January"
+- Dates resolved using departure city timezone
+- Multiple flights in single message
+- Duplicate detection
+- Flight validation before subscribing
 
 ---
 
 ## Medium Priority
 
-### 4. Leave-for-Airport Notifications
+### 5. Leave-for-Airport Notifications
 **Status:** Not Implemented  
 **Effort:** Medium  
 **Description:** Calculate when user should leave for airport based on departure time, and send a reminder.
@@ -64,7 +91,7 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 5. Boarding Zone Timing Estimates
+### 6. Boarding Zone Timing Estimates
 **Status:** Not Implemented  
 **Effort:** Low  
 **Description:** Estimate when user's boarding zone will be called based on departure time and typical boarding patterns.
@@ -76,7 +103,7 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 6. Baggage Belt Information
+### 7. Baggage Belt Information
 **Status:** Not Implemented  
 **Effort:** Medium  
 **Description:** Notify users which baggage carousel to go to upon arrival.
@@ -88,7 +115,7 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 7. User Preferences & Settings
+### 8. User Preferences & Settings
 **Status:** Not Implemented  
 **Effort:** Medium  
 **Description:** Allow users to configure notification preferences.
@@ -103,14 +130,14 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ## Low Priority
 
-### 8. Express Security/TSA Pre Suggestions
+### 9. Express Security/TSA Pre Suggestions
 **Status:** Not Implemented  
 **Effort:** Low  
 **Description:** Remind users about expedited security options if available.
 
 ---
 
-### 9. Seat Intelligence
+### 10. Seat Intelligence
 **Status:** Not Implemented  
 **Effort:** High  
 **Description:** Track seat assignments and notify about upgrades or changes.
@@ -119,7 +146,7 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 10. Airport Navigation Instructions
+### 11. Airport Navigation Instructions
 **Status:** Not Implemented  
 **Effort:** High  
 **Description:** Provide walking directions within airports for connections.
@@ -128,7 +155,7 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 11. Layover Suggestions
+### 12. Layover Suggestions
 **Status:** Not Implemented  
 **Effort:** Medium  
 **Description:** For long layovers, suggest lounges, restaurants, or activities.
@@ -137,7 +164,7 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 12. Weather & Local Time Info
+### 13. Weather & Local Time Info
 **Status:** Not Implemented  
 **Effort:** Low  
 **Description:** Include destination weather and local time in pre-landing summary.
@@ -146,7 +173,7 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 13. Immigration Prep
+### 14. Immigration Prep
 **Status:** Not Implemented  
 **Effort:** Low  
 **Description:** Remind international travelers about immigration requirements.
@@ -155,7 +182,7 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 
 ---
 
-### 14. Ground Transport Instructions
+### 15. Ground Transport Instructions
 **Status:** Not Implemented  
 **Effort:** Medium  
 **Description:** Provide info about getting from airport to final destination.
@@ -181,16 +208,14 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 ### 5. WhatsApp Template Messages
 **Description:** Register pre-approved WhatsApp templates for proactive notifications outside the 24-hour window.
 
-### 6. Conversation Memory for WhatsApp Queries
-**Description:** Add conversation history to enable follow-up questions in WhatsApp.
+### ~~6. Conversation Memory for WhatsApp Queries~~ ✅ COMPLETED
+**Description:** Conversation history now enables follow-up questions in WhatsApp.
 
-**Current Issue:** Each WhatsApp message is stateless - Flait has no memory of previous messages in the conversation.
-
-**Implementation Plan:**
-- Store last 5-10 messages per user in DynamoDB with 1-hour TTL
-- Schema: `PK: CONV#{phone}`, `SK: {timestamp}`, `role: user|assistant`
-- Pass conversation history to Gemini for context-aware responses
-- Example: "What's my flight status?" → "What about the gate?" (second message needs context)
+**Implementation:**
+- Stores last 10 messages per user in DynamoDB with 1-hour TTL
+- Schema: `PK: CONV#{phone}`, `SK: {timestamp}#{role}`
+- Passes conversation history to Gemini for context-aware responses
+- Completed: 2026-01-22
 
 ---
 
@@ -214,6 +239,9 @@ Users can now send WhatsApp messages to the Flait number and receive intelligent
 - [x] Rate limiting for WhatsApp queries (20/hour)
 - [x] Pre-computed local times, flight phases, and connection analysis for LLM context
 - [x] Time change notifications with old→new format and difference (e.g., "07:45 → 08:27 (+42m)")
+- [x] Conversation memory for WhatsApp follow-up questions (10 messages, 1-hour TTL)
+- [x] Inbound aircraft tracking with delay and landed alerts
+- [x] WhatsApp flight subscription via natural language ("Track KL880 tomorrow")
 
 ---
 
