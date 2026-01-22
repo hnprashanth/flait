@@ -1544,3 +1544,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return twimlResponse();
   }
 };
+
+// Export internal functions for testing
+export const _testExports = {
+  resolveDateInTimezone,
+  parseGeminiResponse,
+  formatDateForDisplay,
+  formatDepartureTimeForDisplay,
+  formatLocalTime,
+  getBestDepartureTime,
+  getBestArrivalTime,
+  calculateTimeUntil,
+  getFlightPhase,
+  analyzeConnection,
+  parseTwilioWebhook,
+  extractPhoneNumber,
+  parseSubscriptionSK,
+  formatSubscriptionResponse,
+};

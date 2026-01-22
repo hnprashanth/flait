@@ -183,7 +183,7 @@ async function fetchInboundFlightInfo(inboundFaFlightId: string): Promise<Inboun
       delay_minutes: delayMinutes,
     };
   } catch (error) {
-    console.error('Error fetching inbound flight info:', error);
+    console.error(`Error fetching inbound flight ${inboundFaFlightId}:`, error);
     return null;
   }
 }
@@ -426,8 +426,8 @@ async function checkAndRecalculateSchedules(
               recalculate: true,
               new_departure_time: newTime,
               fa_flight_id: faFlightId,
-            };
-            
+};
+
             console.log(`Invoking schedule recalculation with payload:`, payload);
             
             await lambdaClient.send(new InvokeCommand({
@@ -962,3 +962,15 @@ export const handler = async (
   }
 };
 
+// Export internal functions for testing
+export const _testExports = {
+  extractFlightFields,
+  compareFlightData,
+  detectMilestones,
+  extractAirportCode,
+  extractAirportTimezone,
+  extractAirportCity,
+  shouldCheckInbound,
+  shouldAlertInboundDelay,
+  shouldAlertInboundLanded,
+};

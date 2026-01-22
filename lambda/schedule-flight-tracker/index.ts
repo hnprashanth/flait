@@ -525,3 +525,12 @@ export const handler = async (
     };
   }
 };
+
+// Export internal functions for testing
+export const _testExports = {
+  calculateSchedulePhases,
+  extractFlightInfo,
+  generateScheduleName,
+  intervalToRateExpression,
+  getNextDay,
+};

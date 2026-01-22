@@ -420,6 +420,282 @@ describe('WhatsApp Query Handler', () => {
   });
 });
 
+// --- Import test exports for unit testing ---
+import { _testExports } from '../lambda/whatsapp-query-handler/index';
+
+const {
+  resolveDateInTimezone,
+  parseGeminiResponse,
+  formatDateForDisplay,
+  extractPhoneNumber,
+  parseSubscriptionSK,
+  getFlightPhase,
+  analyzeConnection,
+} = _testExports;
+
+// --- Unit Tests for Internal Functions ---
+
+describe('WhatsApp Handler - Date Resolution', () => {
+  // Note: These tests use the real system time.
+  // The function uses the provided timezone to calculate the date.
+  
+  test('resolves "tomorrow" to a valid future date', () => {
+    const result = resolveDateInTimezone('tomorrow', 'America/New_York');
+    // Should be a valid YYYY-MM-DD format
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('resolves "today" to a valid date', () => {
+    const result = resolveDateInTimezone('today', 'America/New_York');
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('resolves "in 3 days" to a valid future date', () => {
+    const result = resolveDateInTimezone('in 3 days', 'America/New_York');
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('returns YYYY-MM-DD format unchanged if already in that format', () => {
+    const result = resolveDateInTimezone('2026-02-15', 'America/New_York');
+    expect(result).toBe('2026-02-15');
+  });
+
+  test('handles different timezones without error', () => {
+    const nyResult = resolveDateInTimezone('tomorrow', 'America/New_York');
+    const tokyoResult = resolveDateInTimezone('tomorrow', 'Asia/Tokyo');
+    const londonResult = resolveDateInTimezone('tomorrow', 'Europe/London');
+    
+    expect(nyResult).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(tokyoResult).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(londonResult).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('resolves "next monday" to a valid date', () => {
+    const result = resolveDateInTimezone('next monday', 'America/New_York');
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('resolves month day formats like "Jan 25"', () => {
+    const result = resolveDateInTimezone('Jan 25', 'America/New_York');
+    // Should return a valid date in January
+    expect(result).toMatch(/^\d{4}-01-\d{2}$/);
+  });
+
+  test('resolves full month name "February 14"', () => {
+    const result = resolveDateInTimezone('February 14', 'America/New_York');
+    // Should return a valid date in February
+    expect(result).toMatch(/^\d{4}-02-\d{2}$/);
+  });
+});
+
+describe('WhatsApp Handler - Gemini Response Parsing', () => {
+  test('parses regular text response as query intent', () => {
+    const result = parseGeminiResponse('Your flight is on time!');
+    expect(result.intent).toBe('query');
+    expect(result.text).toBe('Your flight is on time!');
+  });
+
+  test('parses JSON subscription intent with single flight', () => {
+    // Gemini returns JSON object with intent and flights
+    const response = '{"intent":"subscribe","flights":[{"flight_number":"KL880","date_text":"tomorrow"}]}';
+    
+    const result = parseGeminiResponse(response);
+    expect(result.intent).toBe('subscribe');
+    expect(result.flights).toHaveLength(1);
+    expect(result.flights![0].flight_number).toBe('KL880');
+    expect(result.flights![0].date_text).toBe('tomorrow');
+  });
+
+  test('parses JSON subscription intent with multiple flights', () => {
+    const response = '{"intent":"subscribe","flights":[{"flight_number":"KL880","date_text":"tomorrow"},{"flight_number":"KL605","date_text":"Jan 25"}]}';
+    
+    const result = parseGeminiResponse(response);
+    expect(result.intent).toBe('subscribe');
+    expect(result.flights).toHaveLength(2);
+    expect(result.flights![0].flight_number).toBe('KL880');
+    expect(result.flights![1].flight_number).toBe('KL605');
+  });
+
+  test('handles non-JSON text as query', () => {
+    const response = 'I can help you track flights. Just tell me which flight!';
+    
+    const result = parseGeminiResponse(response);
+    expect(result.intent).toBe('query');
+    expect(result.text).toBe(response);
+  });
+
+  test('handles malformed JSON as query', () => {
+    const response = '{not valid json}';
+    
+    const result = parseGeminiResponse(response);
+    expect(result.intent).toBe('query');
+  });
+});
+
+describe('WhatsApp Handler - Utility Functions', () => {
+  test('formatDateForDisplay formats date nicely', () => {
+    const result = formatDateForDisplay('2026-01-22');
+    expect(result).toContain('Jan');
+    expect(result).toContain('22');
+  });
+
+  test('extractPhoneNumber removes whatsapp: prefix', () => {
+    expect(extractPhoneNumber('whatsapp:+919900110110')).toBe('+919900110110');
+    expect(extractPhoneNumber('+919900110110')).toBe('+919900110110');
+  });
+
+  test('parseSubscriptionSK parses SK correctly', () => {
+    const result = parseSubscriptionSK('SUB#2026-01-22#KL880');
+    expect(result).toEqual({ date: '2026-01-22', flight_number: 'KL880' });
+  });
+
+  test('parseSubscriptionSK returns null for invalid SK', () => {
+    expect(parseSubscriptionSK('INVALID')).toBeNull();
+    expect(parseSubscriptionSK('SUB#only-date')).toBeNull();
+  });
+});
+
+describe('WhatsApp Handler - Flight Phase Detection', () => {
+  test('returns "Arrived" for landed flight', () => {
+    const flight = {
+      flight_number: 'KL880',
+      date: '2026-01-22',
+      status: 'Arrived',
+      departure_airport: 'BLR',
+      arrival_airport: 'AMS',
+      actual_arrival: '2026-01-22T10:00:00Z',
+    };
+    expect(getFlightPhase(flight as any)).toBe('Arrived');
+  });
+
+  test('returns "In Flight" for airborne flight', () => {
+    const flight = {
+      flight_number: 'KL880',
+      date: '2026-01-22',
+      status: 'En Route',
+      departure_airport: 'BLR',
+      arrival_airport: 'AMS',
+      actual_departure: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      estimated_arrival: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+    };
+    expect(getFlightPhase(flight as any)).toBe('In Flight');
+  });
+
+  test('returns "Boarding" for flight departing soon', () => {
+    const flight = {
+      flight_number: 'KL880',
+      estimated_departure: new Date(Date.now() + 20 * 60 * 1000).toISOString(), // 20 min from now
+    };
+    expect(getFlightPhase(flight as any)).toBe('Boarding');
+  });
+
+  test('returns "Go to Gate" for flight 1-2 hours away', () => {
+    const flight = {
+      flight_number: 'KL880',
+      estimated_departure: new Date(Date.now() + 90 * 60 * 1000).toISOString(), // 90 min from now
+    };
+    expect(getFlightPhase(flight as any)).toBe('Go to Gate');
+  });
+
+  test('returns "Upcoming" for flight > 24 hours away', () => {
+    const flight = {
+      flight_number: 'KL880',
+      estimated_departure: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(), // 48 hours from now
+    };
+    expect(getFlightPhase(flight as any)).toBe('Upcoming');
+  });
+});
+
+describe('WhatsApp Handler - Connection Analysis', () => {
+  test('analyzes valid connection and returns layover info', () => {
+    const arriving = {
+      flight_number: 'KL880',
+      date: '2026-01-22',
+      status: 'Scheduled',
+      departure_airport: 'BLR',
+      arrival_airport: 'AMS',
+      estimated_arrival: '2026-01-23T07:30:00Z',
+      terminal_destination: 'D',
+    };
+    
+    const departing = {
+      flight_number: 'KL605',
+      date: '2026-01-23',
+      status: 'Scheduled',
+      departure_airport: 'AMS',
+      arrival_airport: 'SFO',
+      estimated_departure: '2026-01-23T09:00:00Z',
+      terminal_origin: 'E',
+    };
+    
+    const result = analyzeConnection(arriving as any, departing as any);
+    
+    expect(result).not.toBeNull();
+    expect(result!.layover_duration).toContain('1h'); // 90 minutes = 1h 30m
+    expect(result!.same_terminal).toBe(false); // D != E
+    expect(result!.risk_level).toBeDefined();
+    expect(result!.recommendation).toBeDefined();
+  });
+
+  test('returns null when times are invalid', () => {
+    const arriving = {
+      flight_number: 'KL880',
+      arrival_airport: 'AMS',
+      // Missing estimated_arrival
+    };
+    
+    const departing = {
+      flight_number: 'KL605',
+      departure_airport: 'AMS',
+      estimated_departure: '2026-01-23T09:00:00Z',
+    };
+    
+    const result = analyzeConnection(arriving as any, departing as any);
+    expect(result).toBeNull();
+  });
+
+  test('assesses tight connection risk correctly', () => {
+    const arriving = {
+      flight_number: 'KL880',
+      arrival_airport: 'AMS',
+      estimated_arrival: '2026-01-23T08:30:00Z',
+      terminal_destination: 'D',
+    };
+    
+    // Tight connection: only 30 minutes
+    const departing = {
+      flight_number: 'KL605',
+      departure_airport: 'AMS',
+      estimated_departure: '2026-01-23T09:00:00Z',
+      terminal_origin: 'D',
+    };
+    
+    const result = analyzeConnection(arriving as any, departing as any);
+    
+    expect(result).not.toBeNull();
+    expect(result!.layover_duration).toContain('30m');
+    // Tight connection should have risky level
+    expect(['tight', 'risky']).toContain(result!.risk_level);
+  });
+
+  test('identifies same terminal correctly', () => {
+    const arriving = {
+      estimated_arrival: '2026-01-23T08:00:00Z',
+      terminal_destination: 'D',
+    };
+    
+    const departing = {
+      estimated_departure: '2026-01-23T10:00:00Z',
+      terminal_origin: 'D', // Same terminal
+    };
+    
+    const result = analyzeConnection(arriving as any, departing as any);
+    
+    expect(result).not.toBeNull();
+    expect(result!.same_terminal).toBe(true);
+  });
+});
+
 describe('Timezone Formatting', () => {
   const mockDbSend = DynamoDBDocumentClient.from({} as any).send as jest.Mock;
 
