@@ -835,3 +835,20 @@ async function sendWhatsAppNotification(userId: string, message: string): Promis
     throw error; // Rethrow to trigger Lambda retry/DLQ
   }
 }
+
+// --- Test Exports ---
+// Export internal functions for unit testing
+export const _testExports = {
+  generateMilestoneMessage,
+  generateChangeMessage,
+  generateCombinedMessage,
+  generateInboundDelayMessage,
+  generateInboundLandedMessage,
+  formatTime,
+  formatDateTime,
+  formatTimeDiff,
+  formatConnectionInfo,
+  calculateConnectionRisk,
+  analyzeConnections,
+  getMilestoneHeader,
+};

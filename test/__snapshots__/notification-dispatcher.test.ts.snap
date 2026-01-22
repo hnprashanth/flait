@@ -1,0 +1,212 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`generateChangeMessage generates arrival gate assignment message 1`] = `
+"*Flight Update: KL879*
+
+Arrival gate: *A12*"
+`;
+
+exports[`generateChangeMessage generates arrival time change message 1`] = `
+"*Flight Update: KL879*
+
+Arrival: 03:30 AM GMT+5:30 → *04:15 AM GMT+5:30* (+45m)"
+`;
+
+exports[`generateChangeMessage generates baggage claim assignment message 1`] = `
+"*Flight Update: KL879*
+
+Baggage claim: *Belt 5*
+Terminal: Terminal 2
+Arrival gate: A12"
+`;
+
+exports[`generateChangeMessage generates baggage claim change message 1`] = `
+"*Flight Update: KL879*
+
+Baggage claim changed: Belt 3 → *Belt 5*"
+`;
+
+exports[`generateChangeMessage generates departure time change message 1`] = `
+"*Flight Update: KL879*
+
+Departure: 11:00 AM GMT+1 → *11:45 AM GMT+1* (+45m)"
+`;
+
+exports[`generateChangeMessage generates fallback message when no specific changes 1`] = `
+"*Flight Update: KL879*
+
+Your flight details:
+
+Status: *Delayed*
+Route: Amsterdam → Mumbai
+Departure: *11:45 AM GMT+1*
+Arrival: *Thu 04:15 AM GMT+5:30*
+Gate: D42"
+`;
+
+exports[`generateChangeMessage generates gate change message 1`] = `
+"*Flight Update: KL879*
+
+Gate changed: D40 → *D42*"
+`;
+
+exports[`generateChangeMessage generates multiple changes message 1`] = `
+"*Flight Update: KL879*
+
+Status: On Time → *Delayed*
+Departure: 11:00 AM GMT+1 → *12:30 PM GMT+1* (+1h 30m)
+Gate changed: D40 → *D42*"
+`;
+
+exports[`generateChangeMessage generates status change message 1`] = `
+"*Flight Update: KL879*
+
+Status: On Time → *Delayed*"
+`;
+
+exports[`generateCombinedMessage generates 4h milestone with gate change 1`] = `
+"*KL879 - 4 Hours to Departure*
+
+*Updates:*
+Gate: D40 → *D42*
+
+*Current Status:*
+Departure: 11:00 AM GMT+1
+Gate: D42
+Status: On Time"
+`;
+
+exports[`generateCombinedMessage generates 24h milestone with delay 1`] = `
+"*KL879 - 24 Hours to Departure*
+
+*Updates:*
+Departure: 11:00 AM GMT+1 → *12:00 PM GMT+1* (+1h)
+
+*Current Status:*
+Departure: 12:00 PM GMT+1
+Gate: D42
+Status: On Time"
+`;
+
+exports[`generateCombinedMessage generates boarding milestone with status change 1`] = `
+"*KL879 - Boarding Soon*
+
+*Updates:*
+Status: On Time → *Boarding*
+
+*Current Status:*
+Departure: 11:00 AM GMT+1
+Gate: D42
+Status: On Time"
+`;
+
+exports[`generateInboundDelayMessage generates inbound delay message with hours 1`] = `
+"⚠️ *Inbound Aircraft Update: KL879*
+
+Your aircraft is on its way from Mumbai as flight KL878.
+
+Status: *En Route - Delayed*
+Expected at AMS: *03:30 PM GMT+1*
+Current delay: *2h 30m late*
+
+This may affect your departure. We'll keep you updated."
+`;
+
+exports[`generateInboundDelayMessage generates inbound delay message with minutes 1`] = `
+"⚠️ *Inbound Aircraft Update: KL879*
+
+Your aircraft is on its way from Mumbai as flight KL878.
+
+Status: *En Route - Delayed*
+Expected at AMS: *01:45 PM GMT+1*
+Current delay: *45 minutes late*
+
+This may affect your departure. We'll keep you updated."
+`;
+
+exports[`generateInboundLandedMessage generates inbound landed message 1`] = `
+"✅ *Good news for KL879!*
+
+Your aircraft has landed at AMS from Mumbai (flight KL878).
+
+Arrived: 01:15 PM GMT+1
+
+The crew will now prepare for your flight.
+Your scheduled departure: 03:00 PM GMT+1"
+`;
+
+exports[`generateMilestoneMessage generates 4h reminder message 1`] = `
+"*KL879 - 4 Hours to Departure*
+
+Time to head to the airport!
+
+Status: On Time
+Departure: 11:00 AM GMT+1
+Gate: D42
+Terminal: Terminal 3"
+`;
+
+exports[`generateMilestoneMessage generates 12h reminder message 1`] = `
+"*KL879 - 12 Hours to Go*
+
+Status: On Time
+Departure: 11:00 AM GMT+1
+Gate: D42"
+`;
+
+exports[`generateMilestoneMessage generates 24h reminder message 1`] = `
+"*KL879 - 24 Hours to Departure*
+
+Status: On Time
+Departure: 11:00 AM GMT+1
+From: Amsterdam
+Gate: D42"
+`;
+
+exports[`generateMilestoneMessage generates boarding message 1`] = `
+"*KL879 - Boarding Soon*
+
+Boarding begins in approximately 30 minutes.
+
+Gate: D42
+Terminal: Terminal 3"
+`;
+
+exports[`generateMilestoneMessage generates check-in message 1`] = `
+"*Check-in Open: KL879*
+
+Online check-in is now available!
+
+Departure: 11:00 AM GMT+1
+From: Amsterdam
+Gate: D42
+Terminal: Terminal 3"
+`;
+
+exports[`generateMilestoneMessage generates message with connection info 1`] = `
+"*Landing in ~1 Hour*
+
+Your flight KL879 is approaching Mumbai.
+Expected arrival: 03:30 AM GMT+5:30
+Arrival gate: A12
+
+ *Connection to AI101*
+Time: 1h 30m (90 min - comfortable)"
+`;
+
+exports[`generateMilestoneMessage generates pre-landing message 1`] = `
+"*Landing in ~1 Hour*
+
+Your flight KL879 is approaching Mumbai.
+Expected arrival: 03:30 AM GMT+5:30
+Arrival gate: A12"
+`;
+
+exports[`generateMilestoneMessage generates pre-landing message with baggage claim 1`] = `
+"*Landing in ~1 Hour*
+
+Your flight KL879 is approaching Mumbai.
+Expected arrival: 03:30 AM GMT+5:30
+Arrival gate: A12
+Baggage claim: Belt 5"
+`;
