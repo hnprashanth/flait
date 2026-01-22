@@ -271,7 +271,7 @@ describe('Notification Dispatcher', () => {
         to: 'whatsapp:+19998887777',
       });
       expect(mockCreate).toHaveBeenCalledWith({
-        body: expect.stringContaining('Gate: *B12*'),
+        body: expect.stringContaining('Gate: B10 → *B12*'),
         from: expect.any(String),
         to: expect.any(String),
       });

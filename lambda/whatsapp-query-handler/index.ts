@@ -21,7 +21,7 @@ const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER!;
 // --- Constants ---
 const RATE_LIMIT_MAX_QUERIES = 20;
 const RATE_LIMIT_WINDOW_HOURS = 1;
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-3-flash-preview';
 
 // --- Interfaces ---
 interface TwilioWebhookPayload {
@@ -653,13 +653,16 @@ async function askGemini(question: string, flightContext: FlightContext[]): Prom
         },
       ],
       generationConfig: {
-        maxOutputTokens: 500,
+        maxOutputTokens: 4096,
         temperature: 0.7,
       },
     });
 
     const response = result.response;
     const text = response.text();
+    
+    console.log('Gemini raw response:', JSON.stringify(response));
+    console.log('Gemini text:', text);
 
     if (!text) {
       return "I'm sorry, I couldn't generate a response. Please try again!";

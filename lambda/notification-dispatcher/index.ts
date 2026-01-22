@@ -439,12 +439,18 @@ function generateChangeMessage(
   }
 
   if (changes.estimated_departure) {
-    lines.push(`New Est. Departure: *${formatTime(changes.estimated_departure.new as string, status.departure_timezone)}*`);
+    const oldTime = formatTime(changes.estimated_departure.old as string, status.departure_timezone);
+    const newTime = formatTime(changes.estimated_departure.new as string, status.departure_timezone);
+    const diff = formatTimeDiff(changes.estimated_departure.old as string, changes.estimated_departure.new as string);
+    lines.push(`Departure: ${oldTime} → *${newTime}* (${diff})`);
     hasSpecificChanges = true;
   }
 
   if (changes.estimated_arrival) {
-    lines.push(`New Est. Arrival: *${formatTime(changes.estimated_arrival.new as string, status.arrival_timezone)}*`);
+    const oldTime = formatTime(changes.estimated_arrival.old as string, status.arrival_timezone);
+    const newTime = formatTime(changes.estimated_arrival.new as string, status.arrival_timezone);
+    const diff = formatTimeDiff(changes.estimated_arrival.old as string, changes.estimated_arrival.new as string);
+    lines.push(`Arrival: ${oldTime} → *${newTime}* (${diff})`);
     hasSpecificChanges = true;
   }
 
@@ -504,10 +510,19 @@ function generateCombinedMessage(
       lines.push(`Status: ${changes.status.old} → *${changes.status.new}*`);
     }
     if (changes.estimated_departure) {
-      lines.push(`Est. Departure: *${formatTime(changes.estimated_departure.new as string, status.departure_timezone)}*`);
+      const oldTime = formatTime(changes.estimated_departure.old as string, status.departure_timezone);
+      const newTime = formatTime(changes.estimated_departure.new as string, status.departure_timezone);
+      const diff = formatTimeDiff(changes.estimated_departure.old as string, changes.estimated_departure.new as string);
+      lines.push(`Departure: ${oldTime} → *${newTime}* (${diff})`);
+    }
+    if (changes.estimated_arrival) {
+      const oldTime = formatTime(changes.estimated_arrival.old as string, status.arrival_timezone);
+      const newTime = formatTime(changes.estimated_arrival.new as string, status.arrival_timezone);
+      const diff = formatTimeDiff(changes.estimated_arrival.old as string, changes.estimated_arrival.new as string);
+      lines.push(`Arrival: ${oldTime} → *${newTime}* (${diff})`);
     }
     if (changes.gate_origin) {
-      lines.push(`Gate: *${changes.gate_origin.new}*`);
+      lines.push(`Gate: ${changes.gate_origin.old || 'TBD'} → *${changes.gate_origin.new}*`);
     }
     lines.push('');
   }
@@ -571,6 +586,36 @@ function formatConnectionInfo(connection: ConnectionAnalysis, milestone?: Milest
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Calculates the time difference between two ISO timestamps.
+ * Returns human-readable string like "+45m" or "-1h 30m"
+ */
+function formatTimeDiff(oldTime: string, newTime: string): string {
+  try {
+    const oldDate = new Date(oldTime).getTime();
+    const newDate = new Date(newTime).getTime();
+    const diffMs = newDate - oldDate;
+    const absDiffMs = Math.abs(diffMs);
+    
+    const hours = Math.floor(absDiffMs / (1000 * 60 * 60));
+    const minutes = Math.floor((absDiffMs % (1000 * 60 * 60)) / (1000 * 60));
+    
+    const sign = diffMs >= 0 ? '+' : '-';
+    
+    if (hours === 0 && minutes === 0) {
+      return 'no change';
+    } else if (hours === 0) {
+      return `${sign}${minutes}m`;
+    } else if (minutes === 0) {
+      return `${sign}${hours}h`;
+    } else {
+      return `${sign}${hours}h ${minutes}m`;
+    }
+  } catch {
+    return '';
+  }
 }
 
 /**
