@@ -294,6 +294,8 @@ export class FlaitStack extends cdk.Stack {
         TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN || '',
         TWILIO_FROM_NUMBER: process.env.TWILIO_FROM_NUMBER || '',
         FLIGHTAWARE_API_KEY: process.env.FLIGHTAWARE_API_KEY || '',
+        FLIGHT_TRACKER_FUNCTION_NAME: 'flight-tracker',
+        SCHEDULE_TRACKER_FUNCTION_NAME: 'schedule-flight-tracker',
       },
       bundling: {
         minify: true,
@@ -303,6 +305,18 @@ export class FlaitStack extends cdk.Stack {
     // Grant permissions - read from both tables, write to app table for rate limiting
     appTable.grantReadWriteData(whatsappQueryHandler);
     flightTable.grantReadData(whatsappQueryHandler);
+
+    // Grant permission to invoke flight-tracker and schedule-tracker for provisioning subscriptions
+    whatsappQueryHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['lambda:InvokeFunction'],
+        resources: [
+          `arn:aws:lambda:${this.region}:${this.account}:function:flight-tracker`,
+          `arn:aws:lambda:${this.region}:${this.account}:function:schedule-flight-tracker`,
+        ],
+      })
+    );
 
     // API Gateway route for Twilio webhook
     const whatsappResource = api.root.addResource('whatsapp');

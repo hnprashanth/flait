@@ -1,5 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, GetCommand, UpdateCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import twilio from 'twilio';
@@ -7,6 +8,7 @@ import twilio from 'twilio';
 // --- Clients ---
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
+const lambdaClient = new LambdaClient({});
 let twilioClient: ReturnType<typeof twilio> | null = null;
 let genAI: GoogleGenerativeAI | null = null;
 
@@ -18,6 +20,8 @@ const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID!;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN!;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER!;
 const FLIGHTAWARE_API_KEY = process.env.FLIGHTAWARE_API_KEY!;
+const FLIGHT_TRACKER_FUNCTION_NAME = process.env.FLIGHT_TRACKER_FUNCTION_NAME;
+const SCHEDULE_TRACKER_FUNCTION_NAME = process.env.SCHEDULE_TRACKER_FUNCTION_NAME;
 
 // --- Constants ---
 const RATE_LIMIT_MAX_QUERIES = 20;
@@ -514,7 +518,24 @@ async function checkExistingSubscription(
 }
 
 /**
- * Creates a flight subscription for a user
+ * Invokes a Lambda function asynchronously (fire-and-forget for provisioning)
+ */
+async function invokeLambdaAsync(functionName: string, payload: Record<string, unknown>): Promise<void> {
+  try {
+    await lambdaClient.send(new InvokeCommand({
+      FunctionName: functionName,
+      InvocationType: 'Event', // Async invocation
+      Payload: Buffer.from(JSON.stringify(payload)),
+    }));
+    console.log(`Invoked ${functionName} with payload:`, JSON.stringify(payload));
+  } catch (error) {
+    console.error(`Error invoking ${functionName}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Creates a flight subscription for a user and provisions tracking
  */
 async function createSubscription(
   phone: string,
@@ -523,6 +544,7 @@ async function createSubscription(
   try {
     const now = new Date().toISOString();
     
+    // 1. Save the subscription
     await docClient.send(new PutCommand({
       TableName: APP_TABLE_NAME,
       Item: {
@@ -540,6 +562,33 @@ async function createSubscription(
     }));
     
     console.log(`Created subscription for ${phone}: ${flightInfo.flight_number} on ${flightInfo.date}`);
+    
+    // 2. Provision flight tracking (async - don't block the response)
+    // Flight data was already fetched during validation, but we need to ensure
+    // it's stored and schedules are created
+    const trackingPayload = {
+      flight_number: flightInfo.flight_number,
+      date: flightInfo.date,
+    };
+    
+    // Invoke flight-tracker to ensure data is stored (may already exist from validation)
+    if (FLIGHT_TRACKER_FUNCTION_NAME) {
+      try {
+        await invokeLambdaAsync(FLIGHT_TRACKER_FUNCTION_NAME, trackingPayload);
+      } catch (error) {
+        console.error('Failed to invoke flight-tracker (non-fatal):', error);
+      }
+    }
+    
+    // Invoke schedule-tracker to create polling schedules
+    if (SCHEDULE_TRACKER_FUNCTION_NAME) {
+      try {
+        await invokeLambdaAsync(SCHEDULE_TRACKER_FUNCTION_NAME, trackingPayload);
+      } catch (error) {
+        console.error('Failed to invoke schedule-tracker (non-fatal):', error);
+      }
+    }
+    
     return true;
   } catch (error) {
     console.error('Error creating subscription:', error);
