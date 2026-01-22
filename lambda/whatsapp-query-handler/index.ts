@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, GetCommand, UpdateCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import twilio from 'twilio';
@@ -22,6 +22,8 @@ const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER!;
 const RATE_LIMIT_MAX_QUERIES = 20;
 const RATE_LIMIT_WINDOW_HOURS = 1;
 const GEMINI_MODEL = 'gemini-3-flash-preview';
+const CONVERSATION_HISTORY_LIMIT = 10; // Keep last N messages
+const CONVERSATION_TTL_HOURS = 1; // Expire conversations after 1 hour
 
 // --- Interfaces ---
 interface TwilioWebhookPayload {
@@ -105,6 +107,68 @@ interface Subscription {
   flight_number: string;
   date: string;
   fa_flight_id?: string;
+}
+
+interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+/**
+ * Saves a message to the conversation history
+ */
+async function saveConversationMessage(phone: string, role: 'user' | 'assistant', content: string): Promise<void> {
+  const now = Date.now();
+  const ttl = Math.floor((now + CONVERSATION_TTL_HOURS * 60 * 60 * 1000) / 1000);
+  
+  try {
+    await docClient.send(new PutCommand({
+      TableName: APP_TABLE_NAME,
+      Item: {
+        PK: `CONV#${phone}`,
+        SK: `${now}#${role}`,
+        role,
+        content,
+        timestamp: new Date(now).toISOString(),
+        ttl,
+      },
+    }));
+  } catch (error) {
+    console.error('Error saving conversation message:', error);
+    // Don't throw - conversation memory is not critical
+  }
+}
+
+/**
+ * Retrieves recent conversation history for a user
+ */
+async function getConversationHistory(phone: string): Promise<ConversationMessage[]> {
+  try {
+    const result = await docClient.send(new QueryCommand({
+      TableName: APP_TABLE_NAME,
+      KeyConditionExpression: 'PK = :pk',
+      ExpressionAttributeValues: {
+        ':pk': `CONV#${phone}`,
+      },
+      ScanIndexForward: false, // Most recent first
+      Limit: CONVERSATION_HISTORY_LIMIT,
+    }));
+
+    if (!result.Items || result.Items.length === 0) {
+      return [];
+    }
+
+    // Reverse to get chronological order (oldest first)
+    return result.Items.reverse().map(item => ({
+      role: item.role as 'user' | 'assistant',
+      content: item.content as string,
+      timestamp: item.timestamp as string,
+    }));
+  } catch (error) {
+    console.error('Error fetching conversation history:', error);
+    return [];
+  }
 }
 
 /**
@@ -629,11 +693,16 @@ function formatFlightContext(flights: FlightContext[]): string {
 }
 
 /**
- * Calls Gemini API with the user's question and flight context
+ * Calls Gemini API with the user's question, flight context, and conversation history
  * @param question - User's question
  * @param flightContext - Array of user's flight data
+ * @param conversationHistory - Previous messages in the conversation
  */
-async function askGemini(question: string, flightContext: FlightContext[]): Promise<string> {
+async function askGemini(
+  question: string, 
+  flightContext: FlightContext[], 
+  conversationHistory: ConversationMessage[]
+): Promise<string> {
   if (!genAI) {
     genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
   }
@@ -642,16 +711,46 @@ async function askGemini(question: string, flightContext: FlightContext[]): Prom
 
   const systemPrompt = SYSTEM_PROMPT.replace('{flight_context}', formatFlightContext(flightContext));
 
+  // Build conversation contents for Gemini
+  // Start with system prompt as the first user message
+  const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+  
+  // Add system prompt with first user message or standalone
+  if (conversationHistory.length > 0) {
+    // Add system context as initial user message
+    contents.push({
+      role: 'user',
+      parts: [{ text: systemPrompt + '\n\n[Conversation starts]' }],
+    });
+    contents.push({
+      role: 'model',
+      parts: [{ text: 'I understand. I\'m Flait, your flight assistant. How can I help you?' }],
+    });
+    
+    // Add conversation history
+    for (const msg of conversationHistory) {
+      contents.push({
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.content }],
+      });
+    }
+    
+    // Add current question
+    contents.push({
+      role: 'user',
+      parts: [{ text: question }],
+    });
+  } else {
+    // No history - single message with system prompt
+    contents.push({
+      role: 'user',
+      parts: [{ text: systemPrompt + '\n\nUser question: ' + question }],
+    });
+  }
+
   try {
     const result = await model.generateContent({
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: systemPrompt + '\n\nUser question: ' + question },
-          ],
-        },
-      ],
+      contents,
       generationConfig: {
         maxOutputTokens: 4096,
         temperature: 0.7,
@@ -661,8 +760,7 @@ async function askGemini(question: string, flightContext: FlightContext[]): Prom
     const response = result.response;
     const text = response.text();
     
-    console.log('Gemini raw response:', JSON.stringify(response));
-    console.log('Gemini text:', text);
+    console.log('Gemini response length:', text?.length || 0);
 
     if (!text) {
       return "I'm sorry, I couldn't generate a response. Please try again!";
@@ -767,9 +865,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     console.log(`Retrieved flight data for ${flightContexts.length} flights`);
 
-    // Ask Gemini
-    const response = await askGemini(question, flightContexts);
+    // Get conversation history for context
+    const conversationHistory = await getConversationHistory(phone);
+    console.log(`Retrieved ${conversationHistory.length} messages from conversation history`);
+
+    // Save user's question to conversation history
+    await saveConversationMessage(phone, 'user', question);
+
+    // Ask Gemini with conversation history
+    const response = await askGemini(question, flightContexts, conversationHistory);
     console.log(`Gemini response length: ${response.length} chars`);
+
+    // Save assistant's response to conversation history
+    await saveConversationMessage(phone, 'assistant', response);
 
     // Send response
     await sendWhatsAppMessage(phone, response);

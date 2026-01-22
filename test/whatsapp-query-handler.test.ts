@@ -293,10 +293,49 @@ describe('WhatsApp Query Handler', () => {
     );
   });
 
+  // --- Test: Conversation memory ---
+  test('includes conversation history in Gemini context', async () => {
+    mockDbSend.mockResolvedValueOnce({ Item: null }); // Rate limit get
+    mockDbSend.mockResolvedValueOnce({}); // Rate limit update
+    mockDbSend.mockResolvedValueOnce({ Items: [] }); // No subscriptions
+
+    // Mock conversation history with previous messages
+    mockDbSend.mockResolvedValueOnce({
+      Items: [
+        { role: 'user', content: 'What is my flight status?', timestamp: '2026-01-22T10:00:00Z' },
+        { role: 'assistant', content: 'Your flight KL880 departs at 9:50 PM.', timestamp: '2026-01-22T10:00:05Z' },
+      ],
+    });
+    mockDbSend.mockResolvedValueOnce({}); // Save user message
+    mockDbSend.mockResolvedValueOnce({}); // Save assistant message
+
+    mockGenerateContent.mockResolvedValueOnce({
+      response: { text: () => 'Gate D12, Terminal 3.' },
+    });
+    mockTwilioCreate.mockResolvedValueOnce({ sid: 'SM67890' });
+
+    const event = createTwilioEvent('+919900110110', 'What gate?');
+    await handler(event);
+
+    // Verify Gemini was called with conversation history
+    expect(mockGenerateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contents: expect.arrayContaining([
+          expect.objectContaining({
+            role: 'user',
+            parts: expect.arrayContaining([
+              expect.objectContaining({ text: expect.stringContaining('What is my flight status?') }),
+            ]),
+          }),
+        ]),
+      })
+    );
+  });
+
   // --- Test: Filters old subscriptions ---
   test('filters out past date subscriptions', async () => {
-    mockDbSend.mockResolvedValueOnce({ Item: null });
-    mockDbSend.mockResolvedValueOnce({});
+    mockDbSend.mockResolvedValueOnce({ Item: null }); // Rate limit get
+    mockDbSend.mockResolvedValueOnce({}); // Rate limit update
 
     // Mock subscriptions - one past, one future
     mockDbSend.mockResolvedValueOnce({
@@ -317,6 +356,13 @@ describe('WhatsApp Query Handler', () => {
       }],
     });
 
+    // Conversation history (empty)
+    mockDbSend.mockResolvedValueOnce({ Items: [] });
+    // Save user message
+    mockDbSend.mockResolvedValueOnce({});
+    // Save assistant message
+    mockDbSend.mockResolvedValueOnce({});
+
     mockGenerateContent.mockResolvedValueOnce({
       response: { text: () => 'Response' },
     });
@@ -325,15 +371,15 @@ describe('WhatsApp Query Handler', () => {
     const event = createTwilioEvent('+919900110110', 'Status');
     await handler(event);
 
-    // Should have queried flight data only once (for future flight)
-    // Calls: rate limit get, rate limit update, subscriptions query, flight data query
-    expect(mockDbSend).toHaveBeenCalledTimes(4);
+    // Calls: rate limit get, rate limit update, subscriptions query, flight data query,
+    //        conversation history, save user msg, save assistant msg
+    expect(mockDbSend).toHaveBeenCalledTimes(7);
   });
 
   // --- Test: Filters inactive subscriptions ---
   test('filters out inactive subscriptions', async () => {
-    mockDbSend.mockResolvedValueOnce({ Item: null });
-    mockDbSend.mockResolvedValueOnce({});
+    mockDbSend.mockResolvedValueOnce({ Item: null }); // Rate limit get
+    mockDbSend.mockResolvedValueOnce({}); // Rate limit update
 
     // Mock subscriptions - one inactive, one active
     mockDbSend.mockResolvedValueOnce({
@@ -353,6 +399,13 @@ describe('WhatsApp Query Handler', () => {
       }],
     });
 
+    // Conversation history (empty)
+    mockDbSend.mockResolvedValueOnce({ Items: [] });
+    // Save user message
+    mockDbSend.mockResolvedValueOnce({});
+    // Save assistant message
+    mockDbSend.mockResolvedValueOnce({});
+
     mockGenerateContent.mockResolvedValueOnce({
       response: { text: () => 'Response' },
     });
@@ -361,8 +414,9 @@ describe('WhatsApp Query Handler', () => {
     const event = createTwilioEvent('+919900110110', 'Status');
     await handler(event);
 
-    // Should only query one flight
-    expect(mockDbSend).toHaveBeenCalledTimes(4);
+    // Calls: rate limit get, rate limit update, subscriptions query, flight data query,
+    //        conversation history, save user msg, save assistant msg
+    expect(mockDbSend).toHaveBeenCalledTimes(7);
   });
 });
 
