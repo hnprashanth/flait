@@ -839,27 +839,45 @@ function calculateTimeUntil(utcTimeStr: string | undefined): string | undefined 
 }
 
 /**
- * Determines flight phase based on times
+ * Determines flight phase based on times and status
  */
 function getFlightPhase(flight: FlightContext): string {
   const now = Date.now();
   
   const departure = getBestDepartureTime(flight);
   const arrival = getBestArrivalTime(flight);
+  const status = (flight.status || '').toLowerCase();
   
+  // Check if already arrived
   if (flight.actual_arrival) {
     return 'Arrived';
   }
   
+  // Check if arrived based on status
+  if (status.includes('landed') || status.includes('arrived')) {
+    return 'Arrived';
+  }
+  
+  // Check if in flight - either by actual_departure or status
   if (flight.actual_departure) {
     return 'In Flight';
   }
   
+  // FlightAware uses various status strings for in-flight
+  if (status.includes('en route') || status.includes('in air') || 
+      status.includes('airborne') || status.includes('in flight')) {
+    return 'In Flight';
+  }
+  
+  // Check departure time for scheduling-based phases
   if (departure) {
     const depTime = new Date(departure).getTime();
     const hoursUntil = (depTime - now) / (1000 * 60 * 60);
     
-    if (hoursUntil < 0) {
+    // If departure time has passed but no actual_departure, likely in flight
+    if (hoursUntil < -0.5) {
+      return 'In Flight'; // Departed more than 30 min ago, assume in flight
+    } else if (hoursUntil < 0) {
       return 'Departed';
     } else if (hoursUntil <= 0.5) {
       return 'Boarding';
@@ -1153,6 +1171,8 @@ function parseSubscriptionSK(sk: string): { date: string; flight_number: string 
 
 /**
  * Gets user's active subscriptions
+ * Includes flights departing today or later, AND overnight flights that departed
+ * yesterday but haven't landed yet (arrival date is today or later)
  */
 async function getUserSubscriptions(phone: string): Promise<Subscription[]> {
   const userPK = `USER#${phone}`;
@@ -1171,8 +1191,12 @@ async function getUserSubscriptions(phone: string): Promise<Subscription[]> {
       return [];
     }
 
-    // Filter to only active subscriptions (future flights or today)
-    const today = new Date().toISOString().split('T')[0];
+    // Filter to only active subscriptions
+    // Include: departure date >= today, OR departure date = yesterday (for overnight flights)
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    
     const subscriptions: Subscription[] = [];
 
     for (const item of result.Items) {
@@ -1180,10 +1204,14 @@ async function getUserSubscriptions(phone: string): Promise<Subscription[]> {
       const parsed = parseSubscriptionSK(item.SK as string);
       if (!parsed) continue;
 
-      // Check if active (case-insensitive) and not in the past
+      // Check if active (case-insensitive)
       const status = (item.status as string || '').toUpperCase();
       if (status !== 'ACTIVE') continue;
-      if (parsed.date < today) continue;
+      
+      // Include flights from today or future
+      // Also include yesterday's flights (they might be overnight flights still in the air)
+      // Very old flights (2+ days ago) are excluded
+      if (parsed.date < yesterday) continue;
 
       subscriptions.push({
         flight_number: parsed.flight_number,
