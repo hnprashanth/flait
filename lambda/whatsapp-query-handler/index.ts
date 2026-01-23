@@ -372,13 +372,142 @@ function resolveDateInTimezone(dateText: string, timezone: string): string {
 }
 
 /**
- * Fetches upcoming flights for a flight number from FlightAware
+ * Common IATA to ICAO airline code mappings.
+ * FlightAware primarily uses ICAO codes, but users typically enter IATA codes.
+ * This map covers major airlines - add more as needed.
+ */
+const IATA_TO_ICAO: Record<string, string> = {
+  // Asia-Pacific
+  'JL': 'JAL',   // Japan Airlines
+  'NH': 'ANA',   // All Nippon Airways
+  'SQ': 'SIA',   // Singapore Airlines
+  'CX': 'CPA',   // Cathay Pacific
+  'QF': 'QFA',   // Qantas
+  'AI': 'AIC',   // Air India
+  '6E': 'IGO',   // IndiGo
+  'SG': 'SEJ',   // SpiceJet
+  'UK': 'VTI',   // Vistara
+  'MH': 'MAS',   // Malaysia Airlines
+  'TG': 'THA',   // Thai Airways
+  'GA': 'GIA',   // Garuda Indonesia
+  'PR': 'PAL',   // Philippine Airlines
+  'VN': 'HVN',   // Vietnam Airlines
+  'KE': 'KAL',   // Korean Air
+  'OZ': 'AAR',   // Asiana Airlines
+  'CI': 'CAL',   // China Airlines
+  'BR': 'EVA',   // EVA Air
+  'CA': 'CCA',   // Air China
+  'MU': 'CES',   // China Eastern
+  'CZ': 'CSN',   // China Southern
+  
+  // Europe
+  'KL': 'KLM',   // KLM
+  'AF': 'AFR',   // Air France
+  'BA': 'BAW',   // British Airways
+  'LH': 'DLH',   // Lufthansa
+  'LX': 'SWR',   // Swiss
+  'OS': 'AUA',   // Austrian
+  'AZ': 'ITY',   // ITA Airways
+  'IB': 'IBE',   // Iberia
+  'SK': 'SAS',   // SAS
+  'AY': 'FIN',   // Finnair
+  'EI': 'EIN',   // Aer Lingus
+  'TP': 'TAP',   // TAP Portugal
+  'TK': 'THY',   // Turkish Airlines
+  'EK': 'UAE',   // Emirates
+  'EY': 'ETD',   // Etihad
+  'QR': 'QTR',   // Qatar Airways
+  
+  // Americas
+  'AA': 'AAL',   // American Airlines
+  'UA': 'UAL',   // United Airlines
+  'DL': 'DAL',   // Delta Air Lines
+  'WN': 'SWA',   // Southwest
+  'B6': 'JBU',   // JetBlue
+  'AS': 'ASA',   // Alaska Airlines
+  'AC': 'ACA',   // Air Canada
+  'AM': 'AMX',   // Aeromexico
+  'LA': 'LAN',   // LATAM
+  'AV': 'AVA',   // Avianca
+  'CM': 'CMP',   // Copa Airlines
+  
+  // Low-cost carriers
+  'FR': 'RYR',   // Ryanair
+  'U2': 'EZY',   // easyJet
+  'W6': 'WZZ',   // Wizz Air
+};
+
+/**
+ * Extracts the airline code prefix from a flight number.
+ * Handles both 2-letter IATA codes (e.g., "JL754") and 3-letter ICAO codes (e.g., "JAL754")
+ */
+function extractAirlineCode(flightNumber: string): { airlineCode: string; flightNum: string } {
+  const upper = flightNumber.toUpperCase().trim();
+  
+  // Try 3-letter ICAO code first (e.g., "JAL754")
+  const icaoMatch = upper.match(/^([A-Z]{3})(\d+)$/);
+  if (icaoMatch) {
+    return { airlineCode: icaoMatch[1], flightNum: icaoMatch[2] };
+  }
+  
+  // Try 2-letter IATA code (e.g., "JL754")
+  const iataMatch = upper.match(/^([A-Z0-9]{2})(\d+)$/);
+  if (iataMatch) {
+    return { airlineCode: iataMatch[1], flightNum: iataMatch[2] };
+  }
+  
+  // Fallback - return as-is
+  return { airlineCode: '', flightNum: upper };
+}
+
+/**
+ * Converts an IATA flight number to ICAO format if possible.
+ * e.g., "JL754" -> "JAL754"
+ */
+function convertToIcaoFlightNumber(flightNumber: string): string | null {
+  const { airlineCode, flightNum } = extractAirlineCode(flightNumber);
+  
+  if (!airlineCode || airlineCode.length !== 2) {
+    return null; // Already ICAO or invalid
+  }
+  
+  const icaoCode = IATA_TO_ICAO[airlineCode];
+  if (!icaoCode) {
+    return null; // No mapping available
+  }
+  
+  return `${icaoCode}${flightNum}`;
+}
+
+/**
+ * Fetches upcoming flights for a flight number from FlightAware.
+ * Tries the provided flight number first, then falls back to ICAO code if IATA fails.
  */
 async function fetchUpcomingFlights(flightNumber: string): Promise<any[]> {
+  // First, try with the provided flight number
+  let flights = await fetchFlightsFromApi(flightNumber);
+  
+  if (flights.length > 0) {
+    return flights;
+  }
+  
+  // If no results and it looks like an IATA code, try ICAO
+  const icaoFlightNumber = convertToIcaoFlightNumber(flightNumber);
+  if (icaoFlightNumber) {
+    console.log(`No flights found for ${flightNumber}, trying ICAO code: ${icaoFlightNumber}`);
+    flights = await fetchFlightsFromApi(icaoFlightNumber);
+  }
+  
+  return flights;
+}
+
+/**
+ * Makes the actual API call to FlightAware
+ */
+async function fetchFlightsFromApi(flightNumber: string): Promise<any[]> {
   try {
-    // Fetch flights for the next 7 days
     const url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}`;
-    console.log(`Fetching upcoming flights for ${flightNumber}`);
+    console.log(`Fetching flights for ${flightNumber}`);
     
     const response = await fetch(url, {
       method: 'GET',
@@ -1726,4 +1855,8 @@ export const _testExports = {
   extractPhoneNumber,
   parseSubscriptionSK,
   formatSubscriptionResponse,
+  // IATA/ICAO conversion
+  IATA_TO_ICAO,
+  extractAirlineCode,
+  convertToIcaoFlightNumber,
 };

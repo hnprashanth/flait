@@ -435,6 +435,9 @@ const {
   formatSingleFlight,
   formatFlightContext,
   analyzeConnection,
+  IATA_TO_ICAO,
+  extractAirlineCode,
+  convertToIcaoFlightNumber,
 } = _testExports;
 
 // --- Unit Tests for Internal Functions ---
@@ -1046,5 +1049,92 @@ describe('formatSingleFlight', () => {
     expect(result).toContain('KL880');
     expect(result).toContain('Bengaluru');
     expect(result).toContain('30m late');
+  });
+});
+
+// --- IATA to ICAO Conversion Tests ---
+
+describe('IATA_TO_ICAO mapping', () => {
+  test('contains major airlines', () => {
+    expect(IATA_TO_ICAO['JL']).toBe('JAL');
+    expect(IATA_TO_ICAO['AA']).toBe('AAL');
+    expect(IATA_TO_ICAO['BA']).toBe('BAW');
+    expect(IATA_TO_ICAO['KL']).toBe('KLM');
+    expect(IATA_TO_ICAO['SQ']).toBe('SIA');
+    expect(IATA_TO_ICAO['EK']).toBe('UAE');
+  });
+
+  test('contains Indian carriers', () => {
+    expect(IATA_TO_ICAO['AI']).toBe('AIC');
+    expect(IATA_TO_ICAO['6E']).toBe('IGO');
+    expect(IATA_TO_ICAO['UK']).toBe('VTI');
+  });
+});
+
+describe('extractAirlineCode', () => {
+  test('extracts 2-letter IATA code', () => {
+    const result = extractAirlineCode('JL754');
+    expect(result.airlineCode).toBe('JL');
+    expect(result.flightNum).toBe('754');
+  });
+
+  test('extracts 3-letter ICAO code', () => {
+    const result = extractAirlineCode('JAL754');
+    expect(result.airlineCode).toBe('JAL');
+    expect(result.flightNum).toBe('754');
+  });
+
+  test('handles lowercase input', () => {
+    const result = extractAirlineCode('jl754');
+    expect(result.airlineCode).toBe('JL');
+    expect(result.flightNum).toBe('754');
+  });
+
+  test('handles alphanumeric IATA codes like 6E', () => {
+    const result = extractAirlineCode('6E123');
+    expect(result.airlineCode).toBe('6E');
+    expect(result.flightNum).toBe('123');
+  });
+
+  test('handles longer flight numbers', () => {
+    const result = extractAirlineCode('AA7012');
+    expect(result.airlineCode).toBe('AA');
+    expect(result.flightNum).toBe('7012');
+  });
+
+  test('handles input with spaces', () => {
+    const result = extractAirlineCode('  JL754  ');
+    expect(result.airlineCode).toBe('JL');
+    expect(result.flightNum).toBe('754');
+  });
+});
+
+describe('convertToIcaoFlightNumber', () => {
+  test('converts JL754 to JAL754', () => {
+    expect(convertToIcaoFlightNumber('JL754')).toBe('JAL754');
+  });
+
+  test('converts AA7012 to AAL7012', () => {
+    expect(convertToIcaoFlightNumber('AA7012')).toBe('AAL7012');
+  });
+
+  test('converts KL880 to KLM880', () => {
+    expect(convertToIcaoFlightNumber('KL880')).toBe('KLM880');
+  });
+
+  test('converts 6E123 to IGO123', () => {
+    expect(convertToIcaoFlightNumber('6E123')).toBe('IGO123');
+  });
+
+  test('returns null for already ICAO code', () => {
+    expect(convertToIcaoFlightNumber('JAL754')).toBeNull();
+  });
+
+  test('returns null for unknown airline code', () => {
+    expect(convertToIcaoFlightNumber('XX123')).toBeNull();
+  });
+
+  test('handles lowercase input', () => {
+    expect(convertToIcaoFlightNumber('jl754')).toBe('JAL754');
   });
 });
