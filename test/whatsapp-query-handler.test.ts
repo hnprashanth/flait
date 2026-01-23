@@ -430,6 +430,10 @@ const {
   extractPhoneNumber,
   parseSubscriptionSK,
   getFlightPhase,
+  getFlightPhasePriority,
+  getCurrentFlight,
+  formatSingleFlight,
+  formatFlightContext,
   analyzeConnection,
 } = _testExports;
 
@@ -740,5 +744,307 @@ describe('Timezone Formatting', () => {
 
     expect(result.statusCode).toBe(200);
     // Should not throw - gracefully falls back to UTC
+  });
+});
+
+// --- Flight Prioritization Tests ---
+
+describe('getFlightPhasePriority', () => {
+  test('In Flight has highest priority (1)', () => {
+    expect(getFlightPhasePriority('In Flight')).toBe(1);
+  });
+
+  test('Departed has second priority (2)', () => {
+    expect(getFlightPhasePriority('Departed')).toBe(2);
+  });
+
+  test('Boarding has third priority (3)', () => {
+    expect(getFlightPhasePriority('Boarding')).toBe(3);
+  });
+
+  test('Go to Gate has fourth priority (4)', () => {
+    expect(getFlightPhasePriority('Go to Gate')).toBe(4);
+  });
+
+  test('Check-in Open has fifth priority (5)', () => {
+    expect(getFlightPhasePriority('Check-in Open')).toBe(5);
+  });
+
+  test('Within 24 Hours has sixth priority (6)', () => {
+    expect(getFlightPhasePriority('Within 24 Hours')).toBe(6);
+  });
+
+  test('Upcoming has seventh priority (7)', () => {
+    expect(getFlightPhasePriority('Upcoming')).toBe(7);
+  });
+
+  test('Arrived has lowest priority (8)', () => {
+    expect(getFlightPhasePriority('Arrived')).toBe(8);
+  });
+
+  test('Unknown phase returns default priority (9)', () => {
+    expect(getFlightPhasePriority('Unknown')).toBe(9);
+  });
+
+  test('Invalid phase returns fallback (10)', () => {
+    expect(getFlightPhasePriority('InvalidPhase')).toBe(10);
+  });
+});
+
+describe('getCurrentFlight', () => {
+  test('returns null for empty array', () => {
+    expect(getCurrentFlight([])).toBeNull();
+  });
+
+  test('returns single flight when only one exists', () => {
+    const flight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      scheduled_departure: '2025-01-23T10:00:00Z',
+    };
+    expect(getCurrentFlight([flight as any])).toEqual(flight);
+  });
+
+  test('prioritizes In Flight over Upcoming', () => {
+    const now = new Date();
+    const inFlightFlight = {
+      flight_number: 'KL880',
+      date: '2025-01-23',
+      actual_departure: new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(), // departed 2h ago
+      scheduled_arrival: new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString(),
+    };
+    const upcomingFlight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      scheduled_departure: new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString(), // in 48h
+    };
+
+    const result = getCurrentFlight([upcomingFlight, inFlightFlight] as any[]);
+    expect(result?.flight_number).toBe('KL880');
+  });
+
+  test('prioritizes Boarding over Check-in Open', () => {
+    const now = new Date();
+    const boardingFlight = {
+      flight_number: 'KL880',
+      date: '2025-01-23',
+      scheduled_departure: new Date(now.getTime() + 20 * 60 * 1000).toISOString(), // in 20 min
+    };
+    const checkInFlight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      scheduled_departure: new Date(now.getTime() + 3 * 60 * 60 * 1000).toISOString(), // in 3h
+    };
+
+    const result = getCurrentFlight([checkInFlight, boardingFlight] as any[]);
+    expect(result?.flight_number).toBe('KL880');
+  });
+
+  test('prioritizes earlier flight when same phase', () => {
+    const now = new Date();
+    const earlierFlight = {
+      flight_number: 'KL880',
+      date: '2025-01-23',
+      scheduled_departure: new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString(), // in 48h
+    };
+    const laterFlight = {
+      flight_number: 'KL605',
+      date: '2025-01-24',
+      scheduled_departure: new Date(now.getTime() + 72 * 60 * 60 * 1000).toISOString(), // in 72h
+    };
+
+    // Both are "Upcoming", should pick earlier one
+    const result = getCurrentFlight([laterFlight, earlierFlight] as any[]);
+    expect(result?.flight_number).toBe('KL880');
+  });
+
+  test('deprioritizes Arrived flights', () => {
+    const now = new Date();
+    const arrivedFlight = {
+      flight_number: 'KL880',
+      date: '2025-01-22',
+      actual_arrival: new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(), // landed 2h ago
+    };
+    const upcomingFlight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      scheduled_departure: new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString(),
+    };
+
+    const result = getCurrentFlight([arrivedFlight, upcomingFlight] as any[]);
+    expect(result?.flight_number).toBe('KL605');
+  });
+});
+
+describe('formatFlightContext', () => {
+  test('returns no flights message for empty array', () => {
+    const result = formatFlightContext([]);
+    expect(result).toContain('No flights currently being tracked');
+  });
+
+  test('formats single flight without section headers', () => {
+    const flight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      departure_airport: 'AMS',
+      arrival_airport: 'SFO',
+      status: 'Scheduled',
+      scheduled_departure: '2030-01-23T10:00:00Z',
+    };
+    const result = formatFlightContext([flight as any]);
+    expect(result).toContain('KL605');
+    expect(result).toContain('AMS -> SFO');
+    expect(result).not.toContain('CURRENT FLIGHT');
+    expect(result).not.toContain('OTHER UPCOMING FLIGHTS');
+  });
+
+  test('separates current flight from upcoming when in-flight', () => {
+    const now = new Date();
+    const inFlightFlight = {
+      flight_number: 'KL880',
+      date: '2025-01-23',
+      departure_airport: 'BLR',
+      arrival_airport: 'AMS',
+      status: 'En Route',
+      actual_departure: new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(),
+      scheduled_arrival: new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString(),
+    };
+    const upcomingFlight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      departure_airport: 'AMS',
+      arrival_airport: 'SFO',
+      status: 'Scheduled',
+      scheduled_departure: new Date(now.getTime() + 10 * 60 * 60 * 1000).toISOString(),
+    };
+
+    const result = formatFlightContext([upcomingFlight, inFlightFlight] as any[]);
+    
+    expect(result).toContain('CURRENT FLIGHT');
+    expect(result).toContain('User is likely asking about this one');
+    expect(result).toContain('KL880');
+    expect(result).toContain('OTHER UPCOMING FLIGHTS');
+    expect(result).toContain('KL605');
+  });
+
+  test('shows all flights sorted by relevance when no active flight', () => {
+    const now = new Date();
+    const soonerFlight = {
+      flight_number: 'KL880',
+      date: '2025-01-25',
+      departure_airport: 'BLR',
+      arrival_airport: 'AMS',
+      status: 'Scheduled',
+      scheduled_departure: new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString(),
+    };
+    const laterFlight = {
+      flight_number: 'KL605',
+      date: '2025-01-26',
+      departure_airport: 'AMS',
+      arrival_airport: 'SFO',
+      status: 'Scheduled',
+      scheduled_departure: new Date(now.getTime() + 72 * 60 * 60 * 1000).toISOString(),
+    };
+
+    const result = formatFlightContext([laterFlight, soonerFlight] as any[]);
+    
+    // Should not have "CURRENT FLIGHT" section since both are upcoming
+    expect(result).not.toContain('CURRENT FLIGHT');
+    expect(result).toContain('sorted by relevance');
+    
+    // KL880 should appear first (earlier departure)
+    const kl880Pos = result.indexOf('KL880');
+    const kl605Pos = result.indexOf('KL605');
+    expect(kl880Pos).toBeLessThan(kl605Pos);
+  });
+
+  test('includes Time Until Arrival for in-flight aircraft', () => {
+    const now = new Date();
+    const inFlightFlight = {
+      flight_number: 'KL880',
+      date: '2025-01-23',
+      departure_airport: 'BLR',
+      arrival_airport: 'AMS',
+      status: 'En Route',
+      actual_departure: new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(),
+      estimated_arrival: new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString(),
+    };
+
+    const result = formatFlightContext([inFlightFlight as any]);
+    expect(result).toContain('Time Until Arrival');
+  });
+});
+
+describe('formatSingleFlight', () => {
+  test('includes all basic flight info', () => {
+    const flight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      departure_airport: 'AMS',
+      arrival_airport: 'SFO',
+      status: 'Scheduled',
+      scheduled_departure: '2030-01-23T10:00:00Z',
+      scheduled_arrival: '2030-01-23T12:30:00Z',
+      gate_origin: 'D42',
+      terminal_origin: '3',
+    };
+
+    const result = formatSingleFlight(flight as any);
+    expect(result).toContain('KL605 on 2025-01-23');
+    expect(result).toContain('AMS -> SFO');
+    expect(result).toContain('Scheduled');
+    expect(result).toContain('D42');
+    expect(result).toContain('Terminal 3');
+  });
+
+  test('includes optional label when provided', () => {
+    const flight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      departure_airport: 'AMS',
+      arrival_airport: 'SFO',
+      status: 'Scheduled',
+      scheduled_departure: '2030-01-23T10:00:00Z',
+    };
+
+    const result = formatSingleFlight(flight as any, 'Flight 2:');
+    expect(result).toContain('Flight 2:');
+  });
+
+  test('includes baggage claim when present', () => {
+    const flight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      departure_airport: 'AMS',
+      arrival_airport: 'SFO',
+      status: 'Scheduled',
+      scheduled_departure: '2030-01-23T10:00:00Z',
+      baggage_claim: 'Belt 5',
+    };
+
+    const result = formatSingleFlight(flight as any);
+    expect(result).toContain('Baggage Claim: Belt 5');
+  });
+
+  test('includes inbound aircraft info when present', () => {
+    const flight = {
+      flight_number: 'KL605',
+      date: '2025-01-23',
+      departure_airport: 'AMS',
+      arrival_airport: 'SFO',
+      status: 'Scheduled',
+      scheduled_departure: '2030-01-23T10:00:00Z',
+      inbound_flight_number: 'KL880',
+      inbound_origin: 'BLR',
+      inbound_origin_city: 'Bengaluru',
+      inbound_status: 'En Route',
+      inbound_delay_minutes: 30,
+    };
+
+    const result = formatSingleFlight(flight as any);
+    expect(result).toContain('INBOUND AIRCRAFT');
+    expect(result).toContain('KL880');
+    expect(result).toContain('Bengaluru');
+    expect(result).toContain('30m late');
   });
 });

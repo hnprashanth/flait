@@ -878,6 +878,57 @@ function getFlightPhase(flight: FlightContext): string {
 }
 
 /**
+ * Returns a numeric priority for flight phases (lower = more urgent/relevant)
+ * Used to determine which flight the user is most likely asking about
+ */
+function getFlightPhasePriority(phase: string): number {
+  const priorities: Record<string, number> = {
+    'In Flight': 1,      // Currently flying - highest priority
+    'Departed': 2,       // Just took off
+    'Boarding': 3,       // At the gate, about to board
+    'Go to Gate': 4,     // Should be heading to gate
+    'Check-in Open': 5,  // Within 4 hours
+    'Within 24 Hours': 6,
+    'Upcoming': 7,
+    'Arrived': 8,        // Already landed - lowest priority
+    'Unknown': 9,
+  };
+  return priorities[phase] ?? 10;
+}
+
+/**
+ * Identifies the user's current/most relevant flight based on phase
+ * Priority: In Flight > Departed > Boarding > Go to Gate > Check-in Open > Within 24h > Upcoming > Arrived
+ */
+function getCurrentFlight(flights: FlightContext[]): FlightContext | null {
+  if (flights.length === 0) return null;
+  if (flights.length === 1) return flights[0];
+  
+  // Add phase to each flight and sort by priority
+  const flightsWithPhase = flights.map(f => ({
+    flight: f,
+    phase: getFlightPhase(f),
+  }));
+  
+  // Sort by phase priority (lowest number = highest priority)
+  flightsWithPhase.sort((a, b) => {
+    const priorityA = getFlightPhasePriority(a.phase);
+    const priorityB = getFlightPhasePriority(b.phase);
+    
+    if (priorityA !== priorityB) {
+      return priorityA - priorityB;
+    }
+    
+    // If same priority, sort by departure time (earlier first)
+    const timeA = getBestDepartureTime(a.flight) || '';
+    const timeB = getBestDepartureTime(b.flight) || '';
+    return timeA.localeCompare(timeB);
+  });
+  
+  return flightsWithPhase[0].flight;
+}
+
+/**
  * Analyzes connection between two flights
  * Returns assessment with risk level and recommendations
  */
@@ -973,9 +1024,23 @@ IMPORTANT for subscriptions:
 
 For ALL OTHER messages (questions, greetings, etc.), respond normally with text.
 
+FLIGHT PRIORITY (CRITICAL):
+When the user asks about landing, arrival, or general flight questions without specifying which flight:
+1. If a flight is marked "CURRENT FLIGHT" or has Phase "In Flight" or "Departed" - THIS IS THE FLIGHT THEY'RE ASKING ABOUT
+2. "When am I landing?" = arrival time of the CURRENT in-flight aircraft
+3. "What's my gate?" for someone in-flight = their ARRIVAL gate at the destination
+4. Only mention upcoming/connecting flights if directly relevant to the question
+
+Phase priority for determining current flight:
+- "In Flight" = User is on this plane RIGHT NOW - highest priority
+- "Departed" = Just took off
+- "Boarding" = At the gate boarding
+- "Go to Gate" = Should be walking to gate
+- "Upcoming" = Future flights, lower priority
+
 IMPORTANT - PRE-COMPUTED VALUES:
 - All times are ALREADY converted to local timezone - use them exactly as shown
-- "Time Until Departure" is already calculated - use this value directly
+- "Time Until Departure" and "Time Until Arrival" are already calculated - use them directly
 - "Phase" tells you what the user should be doing (Boarding, Go to Gate, Check-in Open, etc.)
 - Connection analysis (if present) already has risk assessment and recommendations - use these directly
 - DO NOT recalculate any times or durations - they are pre-computed and accurate
@@ -985,6 +1050,7 @@ FLIGHT QUESTIONS:
 - If you don't have flight data for what they're asking, say so politely
 - If the user has no flights tracked, let them know they can say "Track [flight] [date]" to add one
 - Be proactive - if Phase is "Boarding" or "Go to Gate", emphasize urgency
+- If Phase is "In Flight", focus on arrival info (time until landing, arrival gate, baggage claim)
 
 TRAVEL KNOWLEDGE:
 - You have extensive knowledge about airports, terminals, gates, and navigation
@@ -1187,7 +1253,92 @@ async function getFlightData(flightNumber: string, date: string): Promise<Flight
 }
 
 /**
- * Formats flight context for the system prompt with pre-computed values
+ * Formats a single flight's details for context
+ */
+function formatSingleFlight(f: FlightContext, label?: string): string {
+  const lines: string[] = [];
+  
+  if (label) {
+    lines.push(label);
+  }
+  
+  lines.push(`${f.flight_number} on ${f.date}`);
+  lines.push(`  Route: ${f.departure_airport} -> ${f.arrival_airport}`);
+  lines.push(`  Status: ${f.status}`);
+
+  // Flight phase (what user should be doing now)
+  const phase = getFlightPhase(f);
+  lines.push(`  Phase: ${phase}`);
+
+  // Pre-formatted local departure time
+  const bestDeparture = getBestDepartureTime(f);
+  const departureLocal = formatLocalTime(bestDeparture, f.departure_airport);
+  if (departureLocal) {
+    lines.push(`  Departure Time (Local): ${departureLocal}`);
+  }
+
+  // Time until departure (pre-calculated!)
+  const timeUntilDeparture = calculateTimeUntil(bestDeparture);
+  if (timeUntilDeparture) {
+    lines.push(`  Time Until Departure: ${timeUntilDeparture}`);
+  }
+
+  // Pre-formatted local arrival time
+  const bestArrival = getBestArrivalTime(f);
+  const arrivalLocal = formatLocalTime(bestArrival, f.arrival_airport);
+  if (arrivalLocal) {
+    lines.push(`  Arrival Time (Local): ${arrivalLocal}`);
+  }
+
+  // Time until arrival (for in-flight)
+  if (f.actual_departure && !f.actual_arrival) {
+    const timeUntilArrival = calculateTimeUntil(bestArrival);
+    if (timeUntilArrival) {
+      lines.push(`  Time Until Arrival: ${timeUntilArrival}`);
+    }
+  }
+
+  // Gate and terminal info
+  if (f.gate_origin) {
+    lines.push(`  Departure Gate: ${f.gate_origin}${f.terminal_origin ? ` (Terminal ${f.terminal_origin})` : ''}`);
+  }
+  if (f.gate_destination) {
+    lines.push(`  Arrival Gate: ${f.gate_destination}${f.terminal_destination ? ` (Terminal ${f.terminal_destination})` : ''}`);
+  }
+  if (f.baggage_claim) {
+    lines.push(`  Baggage Claim: ${f.baggage_claim}`);
+  }
+  if (f.aircraft_type) {
+    lines.push(`  Aircraft: ${f.aircraft_type}`);
+  }
+  
+  // Inbound aircraft info (if available)
+  if (f.inbound_flight_number) {
+    lines.push('');
+    lines.push('  INBOUND AIRCRAFT:');
+    lines.push(`    Flight: ${f.inbound_flight_number} from ${f.inbound_origin_city || f.inbound_origin}`);
+    lines.push(`    Status: ${f.inbound_status}`);
+    if (f.inbound_delay_minutes && f.inbound_delay_minutes > 0) {
+      const delayHours = Math.floor(f.inbound_delay_minutes / 60);
+      const delayMins = f.inbound_delay_minutes % 60;
+      const delayStr = delayHours > 0 ? `${delayHours}h ${delayMins}m` : `${delayMins}m`;
+      lines.push(`    Delay: ${delayStr} late`);
+    }
+    if (f.inbound_actual_arrival) {
+      const arrivalLocal = formatLocalTime(f.inbound_actual_arrival, f.departure_airport);
+      lines.push(`    Arrived: ${arrivalLocal || f.inbound_actual_arrival}`);
+    } else if (f.inbound_estimated_arrival) {
+      const arrivalLocal = formatLocalTime(f.inbound_estimated_arrival, f.departure_airport);
+      lines.push(`    Expected: ${arrivalLocal || f.inbound_estimated_arrival}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Formats flight context for Gemini with all pre-computed values.
+ * Separates current/active flight from upcoming flights for better context.
  * Includes: local times, time until departure, flight phase, and connection analysis
  */
 function formatFlightContext(flights: FlightContext[]): string {
@@ -1195,85 +1346,65 @@ function formatFlightContext(flights: FlightContext[]): string {
     return 'No flights currently being tracked. The user needs to subscribe to a flight first.';
   }
 
-  const flightSections = flights.map((f, index) => {
-    const lines = [
-      `Flight ${index + 1}: ${f.flight_number} on ${f.date}`,
-      `  Route: ${f.departure_airport} -> ${f.arrival_airport}`,
-      `  Status: ${f.status}`,
-    ];
-
-    // Flight phase (what user should be doing now)
-    const phase = getFlightPhase(f);
-    lines.push(`  Phase: ${phase}`);
-
-    // Pre-formatted local departure time
-    const bestDeparture = getBestDepartureTime(f);
-    const departureLocal = formatLocalTime(bestDeparture, f.departure_airport);
-    if (departureLocal) {
-      lines.push(`  Departure Time (Local): ${departureLocal}`);
-    }
-
-    // Time until departure (pre-calculated!)
-    const timeUntilDeparture = calculateTimeUntil(bestDeparture);
-    if (timeUntilDeparture) {
-      lines.push(`  Time Until Departure: ${timeUntilDeparture}`);
-    }
-
-    // Pre-formatted local arrival time
-    const bestArrival = getBestArrivalTime(f);
-    const arrivalLocal = formatLocalTime(bestArrival, f.arrival_airport);
-    if (arrivalLocal) {
-      lines.push(`  Arrival Time (Local): ${arrivalLocal}`);
-    }
-
-    // Time until arrival (for in-flight)
-    if (f.actual_departure && !f.actual_arrival) {
-      const timeUntilArrival = calculateTimeUntil(bestArrival);
-      if (timeUntilArrival) {
-        lines.push(`  Time Until Arrival: ${timeUntilArrival}`);
+  const sections: string[] = [];
+  
+  // Identify current/most relevant flight
+  const currentFlight = getCurrentFlight(flights);
+  const currentPhase = currentFlight ? getFlightPhase(currentFlight) : 'Unknown';
+  
+  // Determine if the current flight is "active" (in-flight, boarding, etc.)
+  const activePhases = ['In Flight', 'Departed', 'Boarding', 'Go to Gate'];
+  const isCurrentFlightActive = activePhases.includes(currentPhase);
+  
+  if (flights.length === 1) {
+    // Single flight - simple format
+    sections.push(formatSingleFlight(flights[0]));
+  } else {
+    // Multiple flights - separate current from others
+    if (currentFlight && isCurrentFlightActive) {
+      // Highlight the current/active flight
+      sections.push('=== CURRENT FLIGHT (User is likely asking about this one) ===');
+      sections.push(formatSingleFlight(currentFlight));
+      
+      // Add other flights
+      const otherFlights = flights.filter(f => 
+        f.flight_number !== currentFlight.flight_number || f.date !== currentFlight.date
+      );
+      
+      if (otherFlights.length > 0) {
+        sections.push('');
+        sections.push('=== OTHER UPCOMING FLIGHTS ===');
+        otherFlights.forEach((f, index) => {
+          sections.push(formatSingleFlight(f, `Flight ${index + 1}:`));
+          if (index < otherFlights.length - 1) sections.push('');
+        });
       }
+    } else {
+      // No active flight - show all with most relevant first
+      sections.push('=== USER\'S FLIGHTS (sorted by relevance) ===');
+      
+      // Sort by phase priority
+      const sortedFlights = [...flights].sort((a, b) => {
+        const phaseA = getFlightPhase(a);
+        const phaseB = getFlightPhase(b);
+        const priorityA = getFlightPhasePriority(phaseA);
+        const priorityB = getFlightPhasePriority(phaseB);
+        
+        if (priorityA !== priorityB) return priorityA - priorityB;
+        
+        const timeA = getBestDepartureTime(a) || '';
+        const timeB = getBestDepartureTime(b) || '';
+        return timeA.localeCompare(timeB);
+      });
+      
+      sortedFlights.forEach((f, index) => {
+        sections.push(formatSingleFlight(f, `Flight ${index + 1}:`));
+        if (index < sortedFlights.length - 1) sections.push('');
+      });
     }
-
-    // Gate and terminal info
-    if (f.gate_origin) {
-      lines.push(`  Departure Gate: ${f.gate_origin}${f.terminal_origin ? ` (Terminal ${f.terminal_origin})` : ''}`);
-    }
-    if (f.gate_destination) {
-      lines.push(`  Arrival Gate: ${f.gate_destination}${f.terminal_destination ? ` (Terminal ${f.terminal_destination})` : ''}`);
-    }
-    if (f.baggage_claim) {
-      lines.push(`  Baggage Claim: ${f.baggage_claim}`);
-    }
-    if (f.aircraft_type) {
-      lines.push(`  Aircraft: ${f.aircraft_type}`);
-    }
-    
-    // Inbound aircraft info (if available)
-    if (f.inbound_flight_number) {
-      lines.push('');
-      lines.push('  INBOUND AIRCRAFT:');
-      lines.push(`    Flight: ${f.inbound_flight_number} from ${f.inbound_origin_city || f.inbound_origin}`);
-      lines.push(`    Status: ${f.inbound_status}`);
-      if (f.inbound_delay_minutes && f.inbound_delay_minutes > 0) {
-        const delayHours = Math.floor(f.inbound_delay_minutes / 60);
-        const delayMins = f.inbound_delay_minutes % 60;
-        const delayStr = delayHours > 0 ? `${delayHours}h ${delayMins}m` : `${delayMins}m`;
-        lines.push(`    Delay: ${delayStr} late`);
-      }
-      if (f.inbound_actual_arrival) {
-        const arrivalLocal = formatLocalTime(f.inbound_actual_arrival, f.departure_airport);
-        lines.push(`    Arrived: ${arrivalLocal || f.inbound_actual_arrival}`);
-      } else if (f.inbound_estimated_arrival) {
-        const arrivalLocal = formatLocalTime(f.inbound_estimated_arrival, f.departure_airport);
-        lines.push(`    Expected: ${arrivalLocal || f.inbound_estimated_arrival}`);
-      }
-    }
-
-    return lines.join('\n');
-  });
+  }
 
   // Add connection analysis if user has multiple flights
-  let connectionSection = '';
   if (flights.length >= 2) {
     // Sort flights by departure time to find connections
     const sortedFlights = [...flights].sort((a, b) => {
@@ -1304,11 +1435,13 @@ function formatFlightContext(flights: FlightContext[]): string {
     }
 
     if (connectionAnalyses.length > 0) {
-      connectionSection = '\n\nCONNECTION ANALYSIS:\n' + connectionAnalyses.join('\n\n');
+      sections.push('');
+      sections.push('CONNECTION ANALYSIS:');
+      sections.push(connectionAnalyses.join('\n\n'));
     }
   }
 
-  return flightSections.join('\n\n') + connectionSection;
+  return sections.join('\n');
 }
 
 /**
@@ -1556,6 +1689,10 @@ export const _testExports = {
   getBestArrivalTime,
   calculateTimeUntil,
   getFlightPhase,
+  getFlightPhasePriority,
+  getCurrentFlight,
+  formatSingleFlight,
+  formatFlightContext,
   analyzeConnection,
   parseTwilioWebhook,
   extractPhoneNumber,
