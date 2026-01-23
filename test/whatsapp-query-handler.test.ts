@@ -493,6 +493,52 @@ describe('WhatsApp Handler - Date Resolution', () => {
     // Should return a valid date in February
     expect(result).toMatch(/^\d{4}-02-\d{2}$/);
   });
+
+  // Tests for dates with explicit year
+  test('resolves "26th Jan 2026" (day month year)', () => {
+    const result = resolveDateInTimezone('26th Jan 2026', 'America/New_York');
+    expect(result).toBe('2026-01-26');
+  });
+
+  test('resolves "26 January 2026" (day month year without ordinal)', () => {
+    const result = resolveDateInTimezone('26 January 2026', 'America/New_York');
+    expect(result).toBe('2026-01-26');
+  });
+
+  test('resolves "Jan 26th 2026" (month day year)', () => {
+    const result = resolveDateInTimezone('Jan 26th 2026', 'America/New_York');
+    expect(result).toBe('2026-01-26');
+  });
+
+  test('resolves "January 26 2026" (month day year without ordinal)', () => {
+    const result = resolveDateInTimezone('January 26 2026', 'America/New_York');
+    expect(result).toBe('2026-01-26');
+  });
+
+  test('resolves "Jan 26, 2026" (month day, year with comma)', () => {
+    const result = resolveDateInTimezone('Jan 26, 2026', 'America/New_York');
+    expect(result).toBe('2026-01-26');
+  });
+
+  test('resolves "December 31, 2025" (full month with comma)', () => {
+    const result = resolveDateInTimezone('December 31, 2025', 'America/New_York');
+    expect(result).toBe('2025-12-31');
+  });
+
+  test('resolves "1st March 2026" (ordinal day)', () => {
+    const result = resolveDateInTimezone('1st March 2026', 'America/New_York');
+    expect(result).toBe('2026-03-01');
+  });
+
+  test('resolves "22nd Feb 2026" (ordinal day)', () => {
+    const result = resolveDateInTimezone('22nd Feb 2026', 'America/New_York');
+    expect(result).toBe('2026-02-22');
+  });
+
+  test('resolves "3rd Apr 2026" (ordinal day)', () => {
+    const result = resolveDateInTimezone('3rd Apr 2026', 'America/New_York');
+    expect(result).toBe('2026-04-03');
+  });
 });
 
 describe('WhatsApp Handler - Gemini Response Parsing', () => {

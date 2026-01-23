@@ -361,6 +361,46 @@ function resolveDateInTimezone(dateText: string, timezone: string): string {
     }
   }
   
+  // "26th Jan 2026" or "26 January 2026" (day month year)
+  match = lowerText.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\s+(\d{4})$/);
+  if (match) {
+    const day = parseInt(match[1]);
+    const month = monthNames[match[2]];
+    const year = parseInt(match[3]);
+    if (month !== undefined && day >= 1 && day <= 31) {
+      // Construct date string directly to avoid timezone issues
+      const monthStr = String(month + 1).padStart(2, '0');
+      const dayStr = String(day).padStart(2, '0');
+      return `${year}-${monthStr}-${dayStr}`;
+    }
+  }
+  
+  // "Jan 26th 2026" or "January 26 2026" (month day year)
+  match = lowerText.match(/^([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})$/);
+  if (match) {
+    const month = monthNames[match[1]];
+    const day = parseInt(match[2]);
+    const year = parseInt(match[3]);
+    if (month !== undefined && day >= 1 && day <= 31) {
+      const monthStr = String(month + 1).padStart(2, '0');
+      const dayStr = String(day).padStart(2, '0');
+      return `${year}-${monthStr}-${dayStr}`;
+    }
+  }
+  
+  // "Jan 26, 2026" or "January 26, 2026" (month day, year - with comma)
+  match = lowerText.match(/^([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,\s*(\d{4})$/);
+  if (match) {
+    const month = monthNames[match[1]];
+    const day = parseInt(match[2]);
+    const year = parseInt(match[3]);
+    if (month !== undefined && day >= 1 && day <= 31) {
+      const monthStr = String(month + 1).padStart(2, '0');
+      const dayStr = String(day).padStart(2, '0');
+      return `${year}-${monthStr}-${dayStr}`;
+    }
+  }
+  
   // "2026-01-25" (already in correct format)
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateText)) {
     return dateText;
