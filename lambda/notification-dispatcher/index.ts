@@ -431,7 +431,7 @@ function generateMilestoneMessage(
   // Add connection info if available
   if (connection) {
     lines.push('');
-    lines.push(formatConnectionInfo(connection, milestone));
+    lines.push(formatConnectionInfo(connection, flightNumber, milestone));
   }
 
   return lines.join('\n');
@@ -511,7 +511,7 @@ function generateChangeMessage(
   // Add connection impact if relevant
   if (connection) {
     lines.push('');
-    lines.push(formatConnectionInfo(connection, undefined));
+    lines.push(formatConnectionInfo(connection, flightNumber));
   }
 
   return lines.join('\n');
@@ -567,7 +567,7 @@ function generateCombinedMessage(
   // Add connection info
   if (connection) {
     lines.push('');
-    lines.push(formatConnectionInfo(connection, milestone));
+    lines.push(formatConnectionInfo(connection, flightNumber, milestone));
   }
 
   return lines.join('\n');
@@ -590,8 +590,15 @@ function getMilestoneHeader(flightNumber: string, milestone: MilestoneType): str
 
 /**
  * Formats connection information for notification.
+ * @param connection - The connection analysis
+ * @param currentFlight - The flight this notification is about (to determine direction)
+ * @param milestone - Optional milestone type
  */
-function formatConnectionInfo(connection: ConnectionAnalysis, milestone?: MilestoneType): string {
+function formatConnectionInfo(
+  connection: ConnectionAnalysis, 
+  currentFlight: string,
+  milestone?: MilestoneType
+): string {
   const lines: string[] = [];
   const hours = Math.floor(connection.connectionMinutes / 60);
   const mins = connection.connectionMinutes % 60;
@@ -605,14 +612,24 @@ function formatConnectionInfo(connection: ConnectionAnalysis, milestone?: Milest
     critical: '',
   }[connection.riskLevel];
 
-  lines.push(`${riskEmoji} *Connection to ${connection.toFlight}*`);
+  // Determine if this notification is about the arriving or departing flight
+  const isArrivingFlight = connection.fromFlight === currentFlight;
+  
+  if (isArrivingFlight) {
+    // Notification is about the first leg - show connection TO the next flight
+    lines.push(`${riskEmoji} *Connection to ${connection.toFlight}*`);
+  } else {
+    // Notification is about the second leg - show connection FROM the previous flight
+    lines.push(`${riskEmoji} *Connection from ${connection.fromFlight}*`);
+  }
+  
   lines.push(`Time: ${timeStr} (${connection.riskMessage})`);
 
   if (connection.terminalChange) {
     lines.push(`Terminal change: ${connection.fromTerminal || '?'} ➔ ${connection.toTerminal || '?'}`);
   }
 
-  if (milestone === 'pre-landing' && connection.toGate) {
+  if (milestone === 'pre-landing' && connection.toGate && isArrivingFlight) {
     lines.push(`Next gate: ${connection.toGate}`);
   }
 

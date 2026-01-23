@@ -1036,7 +1036,7 @@ describe('analyzeConnections', () => {
 });
 
 describe('formatConnectionInfo', () => {
-  test('formats safe connection', () => {
+  test('formats connection TO next flight when current is arriving flight', () => {
     const connection = {
       fromFlight: 'KL879',
       toFlight: 'AI101',
@@ -1046,10 +1046,26 @@ describe('formatConnectionInfo', () => {
       riskLevel: 'safe' as const,
       riskMessage: '120 min - comfortable',
     };
-    const result = formatConnectionInfo(connection);
+    // KL879 is the arriving flight, so show "Connection to AI101"
+    const result = formatConnectionInfo(connection, 'KL879');
     expect(result).toContain('Connection to AI101');
     expect(result).toContain('2h 0m');
     expect(result).toContain('comfortable');
+  });
+
+  test('formats connection FROM previous flight when current is departing flight', () => {
+    const connection = {
+      fromFlight: 'KL879',
+      toFlight: 'AI101',
+      connectionMinutes: 120,
+      layoverAirport: 'BOM',
+      terminalChange: false,
+      riskLevel: 'safe' as const,
+      riskMessage: '120 min - comfortable',
+    };
+    // AI101 is the departing flight, so show "Connection from KL879"
+    const result = formatConnectionInfo(connection, 'AI101');
+    expect(result).toContain('Connection from KL879');
   });
 
   test('formats connection with terminal change', () => {
@@ -1064,11 +1080,11 @@ describe('formatConnectionInfo', () => {
       riskLevel: 'moderate' as const,
       riskMessage: '75 min with terminal change',
     };
-    const result = formatConnectionInfo(connection);
+    const result = formatConnectionInfo(connection, 'KL879');
     expect(result).toContain('Terminal change: T1 ➔ T2');
   });
 
-  test('includes next gate for pre-landing milestone', () => {
+  test('includes next gate for pre-landing milestone when arriving flight', () => {
     const connection = {
       fromFlight: 'KL879',
       toFlight: 'AI101',
@@ -1079,8 +1095,25 @@ describe('formatConnectionInfo', () => {
       riskLevel: 'safe' as const,
       riskMessage: '90 min - comfortable',
     };
-    const result = formatConnectionInfo(connection, 'pre-landing');
+    // Only show next gate when notification is about the arriving flight
+    const result = formatConnectionInfo(connection, 'KL879', 'pre-landing');
     expect(result).toContain('Next gate: A15');
+  });
+
+  test('does not include next gate when departing flight', () => {
+    const connection = {
+      fromFlight: 'KL879',
+      toFlight: 'AI101',
+      connectionMinutes: 90,
+      layoverAirport: 'BOM',
+      terminalChange: false,
+      toGate: 'A15',
+      riskLevel: 'safe' as const,
+      riskMessage: '90 min - comfortable',
+    };
+    // Don't show next gate when notification is about the departing flight
+    const result = formatConnectionInfo(connection, 'AI101', 'pre-landing');
+    expect(result).not.toContain('Next gate');
   });
 
   test('formats short connection time in minutes only', () => {
@@ -1093,7 +1126,7 @@ describe('formatConnectionInfo', () => {
       riskLevel: 'moderate' as const,
       riskMessage: '45 min - manageable',
     };
-    const result = formatConnectionInfo(connection);
+    const result = formatConnectionInfo(connection, 'KL879');
     expect(result).toContain('45m');
     expect(result).not.toContain('0h');
   });
