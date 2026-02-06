@@ -1014,6 +1014,9 @@ export const handler = async (
           );
           // Update the alerted delay for next comparison
           extractedFields.inbound_alerted_delay_minutes = inboundInfo.delay_minutes;
+        } else if (previousInboundAlertedDelay !== undefined) {
+          // Carry forward previous value to maintain dedup state across records
+          extractedFields.inbound_alerted_delay_minutes = previousInboundAlertedDelay;
         }
         
         // Check if we should alert for inbound landed
