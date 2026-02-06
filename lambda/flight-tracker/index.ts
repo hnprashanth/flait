@@ -555,13 +555,18 @@ async function checkAndRecalculateSchedules(
           
           // Trigger schedule recalculation
           try {
-            const payload = {
+            const payload: Record<string, any> = {
               flight_number: flightNumber,
               date: date,
               recalculate: true,
               new_departure_time: newTime,
               fa_flight_id: faFlightId,
-};
+            };
+            // Include arrival time changes if available
+            const arrivalField = changes['estimated_arrival'] || changes['scheduled_arrival'];
+            if (arrivalField?.new) {
+              payload.new_arrival_time = arrivalField.new;
+            }
 
             console.log(`Invoking schedule recalculation with payload:`, payload);
             

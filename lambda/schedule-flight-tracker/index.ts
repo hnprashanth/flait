@@ -121,6 +121,7 @@ interface FlightRequest {
   date: string; // Format: YYYY-MM-DD
   recalculate?: boolean; // If true, delete existing schedules and recreate
   new_departure_time?: string; // ISO string of new departure time (used with recalculate)
+  new_arrival_time?: string; // ISO string of new arrival time (used with recalculate)
   fa_flight_id?: string; // FlightAware unique flight ID (used with recalculate)
 }
 
@@ -130,6 +131,7 @@ interface FlightAwareResponse {
 
 interface FlightInfo {
   departureTime: Date;
+  arrivalTime: Date;
   faFlightId: string;
 }
 
@@ -262,8 +264,11 @@ function extractFlightInfo(flightData: FlightAwareResponse, targetDate: string):
         return null;
       }
 
-      console.log(`Found flight for ${targetDate} (local: ${localDepartureDate}, UTC: ${utcDate}): fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}`);
-      return { departureTime, faFlightId };
+      const arrivalRaw = flight.actual_in || flight.estimated_in || flight.scheduled_in;
+      // Default to departure + 12h if no arrival info (shouldn't happen with FlightAware)
+      const arrivalTime = arrivalRaw ? new Date(arrivalRaw) : new Date(departureTime.getTime() + 12 * 60 * 60 * 1000);
+      console.log(`Found flight for ${targetDate} (local: ${localDepartureDate}, UTC: ${utcDate}): fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}, arrival=${arrivalTime.toISOString()}`);
+      return { departureTime, arrivalTime, faFlightId };
     }
   }
 
@@ -271,13 +276,16 @@ function extractFlightInfo(flightData: FlightAwareResponse, targetDate: string):
   console.warn(`No exact date match for ${targetDate}, using first flight from response`);
   const firstFlight = flightData.flights[0];
   const scheduledOut = firstFlight.actual_out || firstFlight.estimated_out || firstFlight.scheduled_out;
-  
+  const scheduledIn = firstFlight.actual_in || firstFlight.estimated_in || firstFlight.scheduled_in;
+
   if (!scheduledOut || !firstFlight.fa_flight_id) {
     return null;
   }
 
+  const depTime = new Date(scheduledOut);
   return {
-    departureTime: new Date(scheduledOut),
+    departureTime: depTime,
+    arrivalTime: scheduledIn ? new Date(scheduledIn) : new Date(depTime.getTime() + 12 * 60 * 60 * 1000),
     faFlightId: firstFlight.fa_flight_id,
   };
 }
@@ -293,17 +301,20 @@ interface SchedulePhase {
   window: string;
 }
 
-function calculateSchedulePhases(departureTime: Date, now: Date = new Date()): SchedulePhase[] {
+function calculateSchedulePhases(departureTime: Date, arrivalTime: Date, now: Date = new Date()): SchedulePhase[] {
   const phases: SchedulePhase[] = [];
   const timeToDeparture = departureTime.getTime() - now.getTime();
-  
-  // If flight has already departed or is very close (< 1 minute), return empty
-  if (timeToDeparture < 60000) {
+  const timeToArrival = arrivalTime.getTime() - now.getTime();
+
+  // If flight has already arrived (+ 30min buffer), no schedules needed
+  if (timeToArrival < -30 * 60 * 1000) {
     return phases;
   }
-  
+
   const hoursToDeparture = timeToDeparture / (1000 * 60 * 60);
-  
+
+  // --- Pre-departure phases ---
+
   // Phase 1: > 24 hours - Check every 12 hours
   if (hoursToDeparture > 24) {
     const phase1End = new Date(departureTime.getTime() - 24 * 60 * 60 * 1000);
@@ -316,13 +327,13 @@ function calculateSchedulePhases(departureTime: Date, now: Date = new Date()): S
       });
     }
   }
-  
+
   // Phase 2: 12-24 hours - Check every 2 hours
   if (hoursToDeparture > 12) {
     const phase2Start = new Date(departureTime.getTime() - 24 * 60 * 60 * 1000);
     const phase2End = new Date(departureTime.getTime() - 12 * 60 * 60 * 1000);
     const actualStart = phase2Start > now ? phase2Start : now;
-    
+
     if (actualStart < phase2End) {
       phases.push({
         startTime: actualStart,
@@ -332,13 +343,13 @@ function calculateSchedulePhases(departureTime: Date, now: Date = new Date()): S
       });
     }
   }
-  
+
   // Phase 3: 4-12 hours - Check every 1 hour
   if (hoursToDeparture > 4) {
     const phase3Start = new Date(departureTime.getTime() - 12 * 60 * 60 * 1000);
     const phase3End = new Date(departureTime.getTime() - 4 * 60 * 60 * 1000);
     const actualStart = phase3Start > now ? phase3Start : now;
-    
+
     if (actualStart < phase3End) {
       phases.push({
         startTime: actualStart,
@@ -348,12 +359,12 @@ function calculateSchedulePhases(departureTime: Date, now: Date = new Date()): S
       });
     }
   }
-  
+
   // Phase 4: 0-4 hours - Check every 15 minutes
   if (hoursToDeparture > 0) {
     const phase4Start = new Date(departureTime.getTime() - 4 * 60 * 60 * 1000);
     const actualStart = phase4Start > now ? phase4Start : now;
-    
+
     if (actualStart < departureTime) {
       phases.push({
         startTime: actualStart,
@@ -363,7 +374,52 @@ function calculateSchedulePhases(departureTime: Date, now: Date = new Date()): S
       });
     }
   }
-  
+
+  // --- Post-departure phases ---
+
+  const oneHourBeforeArrival = new Date(arrivalTime.getTime() - 60 * 60 * 1000);
+  const postArrivalBuffer = new Date(arrivalTime.getTime() + 30 * 60 * 1000);
+
+  // Phase 5: In-flight (departure to 1h before arrival) - Check every 30 minutes
+  if (oneHourBeforeArrival > departureTime) {
+    const actualStart = departureTime > now ? departureTime : now;
+    if (actualStart < oneHourBeforeArrival) {
+      phases.push({
+        startTime: actualStart,
+        endTime: oneHourBeforeArrival,
+        interval: '30m',
+        window: 'in-flight',
+      });
+    }
+  }
+
+  // Phase 6: Pre-arrival (last 1h before arrival) - Check every 15 minutes
+  {
+    const phase6Start = oneHourBeforeArrival > departureTime ? oneHourBeforeArrival : departureTime;
+    const actualStart = phase6Start > now ? phase6Start : now;
+    if (actualStart < arrivalTime) {
+      phases.push({
+        startTime: actualStart,
+        endTime: new Date(arrivalTime),
+        interval: '15m',
+        window: 'pre-arrival',
+      });
+    }
+  }
+
+  // Phase 7: Post-arrival (landing confirmation) - Check every 15 minutes for 30 min
+  {
+    const actualStart = arrivalTime > now ? arrivalTime : now;
+    if (actualStart < postArrivalBuffer) {
+      phases.push({
+        startTime: actualStart,
+        endTime: postArrivalBuffer,
+        interval: '15m',
+        window: 'post-arrival',
+      });
+    }
+  }
+
   return phases;
 }
 
@@ -378,6 +434,8 @@ function intervalToRateExpression(interval: string): string {
       return 'rate(2 hours)';
     case '1h':
       return 'rate(1 hour)';
+    case '30m':
+      return 'rate(30 minutes)';
     case '15m':
       return 'rate(15 minutes)';
     default:
@@ -505,6 +563,7 @@ export const handler = async (
             date: (event as any).date,
             recalculate: (event as any).recalculate,
             new_departure_time: (event as any).new_departure_time,
+            new_arrival_time: (event as any).new_arrival_time,
             fa_flight_id: (event as any).fa_flight_id,
         };
     } else if (event.body) {
@@ -556,19 +615,28 @@ export const handler = async (
     }
 
     let departureTime: Date;
+    let arrivalTime: Date;
     let faFlightId: string;
 
-    // If recalculating with provided departure time and fa_flight_id, use those
+    // If recalculating with provided times and fa_flight_id, use those
     if (body.recalculate && body.new_departure_time && body.fa_flight_id) {
       departureTime = new Date(body.new_departure_time);
       faFlightId = body.fa_flight_id;
-      console.log(`Using provided departure time: ${departureTime.toISOString()}, fa_flight_id: ${faFlightId}`);
+      // Fetch arrival time if not provided
+      if (body.new_arrival_time) {
+        arrivalTime = new Date(body.new_arrival_time);
+      } else {
+        const flightData = await fetchFlightInfo(body.flight_number, body.date);
+        const flightInfo = extractFlightInfo(flightData, body.date);
+        arrivalTime = flightInfo?.arrivalTime || new Date(departureTime.getTime() + 12 * 60 * 60 * 1000);
+      }
+      console.log(`Using provided times: departure=${departureTime.toISOString()}, arrival=${arrivalTime.toISOString()}, fa_flight_id: ${faFlightId}`);
     } else {
-      // Fetch flight information to get departure time and fa_flight_id
+      // Fetch flight information to get departure/arrival times and fa_flight_id
       console.log(`Fetching flight info for ${body.flight_number} on ${body.date}`);
       const flightData = await fetchFlightInfo(body.flight_number, body.date);
-      
-      // Extract departure time and fa_flight_id
+
+      // Extract departure time, arrival time, and fa_flight_id
       const flightInfo = extractFlightInfo(flightData, body.date);
       if (!flightInfo) {
         return {
@@ -585,31 +653,16 @@ export const handler = async (
       }
 
       departureTime = flightInfo.departureTime;
+      arrivalTime = flightInfo.arrivalTime;
       faFlightId = flightInfo.faFlightId;
     }
 
-    console.log(`Flight: fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}`);
+    console.log(`Flight: fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}, arrival=${arrivalTime.toISOString()}`);
 
     const now = new Date();
-    const timeToDeparture = departureTime.getTime() - now.getTime();
-    
-    // Check if flight has already departed
-    if (timeToDeparture < 0) {
-      return {
-        statusCode: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
-        body: JSON.stringify({
-          error: 'Flight has already departed',
-          departure_time: departureTime.toISOString(),
-        }),
-      };
-    }
 
-    // Calculate schedule phases
-    const schedulePhases = calculateSchedulePhases(departureTime, now);
+    // Calculate schedule phases (covers pre-departure through post-arrival)
+    const schedulePhases = calculateSchedulePhases(departureTime, arrivalTime, now);
     
     if (schedulePhases.length === 0) {
       return {
