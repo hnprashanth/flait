@@ -849,11 +849,25 @@ async function sendWhatsAppNotification(userId: string, message: string): Promis
   }
 
   try {
-    const result = await twilioClient.messages.create({
-      body: message,
-      from: TWILIO_FROM_NUMBER,
-      to: to,
-    });
+    const TWILIO_CONTENT_SID = process.env.TWILIO_CONTENT_SID;
+
+    let result;
+    if (TWILIO_CONTENT_SID) {
+      // Use pre-approved template — works outside the 24h session window
+      result = await twilioClient.messages.create({
+        contentSid: TWILIO_CONTENT_SID,
+        contentVariables: JSON.stringify({ '1': message }),
+        from: TWILIO_FROM_NUMBER,
+        to: to,
+      });
+    } else {
+      // Fallback to free-form body (only works within 24h window)
+      result = await twilioClient.messages.create({
+        body: message,
+        from: TWILIO_FROM_NUMBER,
+        to: to,
+      });
+    }
     console.log(`Successfully sent WhatsApp message to ${to}. SID: ${result.sid}`);
   } catch (error) {
     console.error(`Failed to send WhatsApp message to ${to}:`, error);

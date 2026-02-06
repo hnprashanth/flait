@@ -258,6 +258,7 @@ export class FlaitStack extends cdk.Stack {
         TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID || '',
         TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN || '',
         TWILIO_FROM_NUMBER: process.env.TWILIO_FROM_NUMBER || '',
+        TWILIO_CONTENT_SID: process.env.TWILIO_CONTENT_SID || '',
       },
       bundling: {
         minify: true,
