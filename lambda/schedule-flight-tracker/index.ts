@@ -6,6 +6,116 @@ const FLIGHTAWARE_API_KEY = process.env.FLIGHTAWARE_API_KEY!;
 const FLIGHT_TRACKER_FUNCTION_ARN = process.env.FLIGHT_TRACKER_FUNCTION_ARN!;
 const SCHEDULER_ROLE_ARN = process.env.SCHEDULER_ROLE_ARN!;
 
+/**
+ * Mapping of 2-letter IATA airline codes to 3-letter ICAO codes
+ * FlightAware AeroAPI uses ICAO codes for flight lookups
+ */
+const IATA_TO_ICAO: Record<string, string> = {
+  // Major international airlines
+  'AA': 'AAL', // American Airlines
+  'UA': 'UAL', // United Airlines
+  'DL': 'DAL', // Delta Air Lines
+  'WN': 'SWA', // Southwest Airlines
+  'BA': 'BAW', // British Airways
+  'AF': 'AFR', // Air France
+  'KL': 'KLM', // KLM Royal Dutch Airlines
+  'LH': 'DLH', // Lufthansa
+  'JL': 'JAL', // Japan Airlines
+  'NH': 'ANA', // All Nippon Airways
+  'QF': 'QFA', // Qantas
+  'SQ': 'SIA', // Singapore Airlines
+  'CX': 'CPA', // Cathay Pacific
+  'EK': 'UAE', // Emirates
+  'EY': 'ETD', // Etihad Airways
+  'QR': 'QTR', // Qatar Airways
+  'TK': 'THY', // Turkish Airlines
+  'SK': 'SAS', // Scandinavian Airlines
+  'TP': 'TAP', // TAP Air Portugal
+  'IB': 'IBE', // Iberia
+  'AC': 'ACA', // Air Canada
+  'NZ': 'ANZ', // Air New Zealand
+  'VS': 'VIR', // Virgin Atlantic
+  'U2': 'EZY', // easyJet
+  'FR': 'RYR', // Ryanair
+  // Asian carriers
+  'AI': 'AIC', // Air India
+  'CI': 'CAL', // China Airlines
+  'BR': 'EVA', // EVA Air
+  'OZ': 'AAR', // Asiana Airlines
+  'KE': 'KAL', // Korean Air
+  'MH': 'MAS', // Malaysia Airlines
+  'GA': 'GIA', // Garuda Indonesia
+  'TG': 'THA', // Thai Airways
+  'VN': 'HVN', // Vietnam Airlines
+  'PR': 'PAL', // Philippine Airlines
+  // Indian carriers
+  '6E': 'IGO', // IndiGo
+  'UK': 'VTI', // Vistara
+  'SG': 'SEJ', // SpiceJet
+  'IX': 'AXB', // Air India Express
+  'G8': 'GOW', // Go First
+  'I5': 'IAD', // AirAsia India
+  'QP': 'AKJ', // Akasa Air
+  // Middle Eastern
+  'WY': 'OMA', // Oman Air
+  'GF': 'GFA', // Gulf Air
+  'SV': 'SVA', // Saudia
+  // European
+  'AZ': 'ITY', // ITA Airways
+  'OS': 'AUA', // Austrian Airlines
+  'LX': 'SWR', // Swiss International
+  'SN': 'BEL', // Brussels Airlines
+};
+
+/**
+ * Extracts airline code and flight number from a flight number string
+ */
+function extractAirlineCode(flightNumber: string): { airlineCode: string | null; flightNum: string | null } {
+  const upper = flightNumber.toUpperCase().trim();
+  
+  // Try 2-letter IATA code first (e.g., "JL754" or "IX-2712")
+  const iataMatch = upper.match(/^([A-Z]{2})[- ]?(\d+)$/);
+  if (iataMatch) {
+    return { airlineCode: iataMatch[1], flightNum: iataMatch[2] };
+  }
+  
+  // Try 3-letter ICAO code (e.g., "JAL754" or "JAL-754")
+  const icaoMatch = upper.match(/^([A-Z]{3})[- ]?(\d+)$/);
+  if (icaoMatch) {
+    return { airlineCode: icaoMatch[1], flightNum: icaoMatch[2] };
+  }
+  
+  // Try alphanumeric 2-char code (e.g., "6E123")
+  const alphaNumMatch = upper.match(/^([A-Z0-9]{2})[- ]?(\d+)$/);
+  if (alphaNumMatch) {
+    return { airlineCode: alphaNumMatch[1], flightNum: alphaNumMatch[2] };
+  }
+  
+  return { airlineCode: null, flightNum: null };
+}
+
+/**
+ * Converts a flight number with IATA airline code to ICAO format
+ * Returns null if already ICAO or unknown airline
+ */
+function convertToIcaoFlightNumber(flightNumber: string): string | null {
+  const { airlineCode, flightNum } = extractAirlineCode(flightNumber);
+  
+  if (!airlineCode || !flightNum) {
+    return null;
+  }
+  
+  // If it's a 2-character code, try to convert to ICAO
+  if (airlineCode.length === 2) {
+    const icaoCode = IATA_TO_ICAO[airlineCode];
+    if (icaoCode) {
+      return `${icaoCode}${flightNum}`;
+    }
+  }
+  
+  return null;
+}
+
 interface FlightRequest {
   flight_number: string;
   date: string; // Format: YYYY-MM-DD
@@ -33,17 +143,18 @@ function getNextDay(dateStr: string): string {
 }
 
 /**
- * Fetches flight information from FlightAware AeroAPI v4 with date filtering
- * to get the correct flight for the specified date
+ * Returns the previous day in YYYY-MM-DD format
  */
-async function fetchFlightInfo(flightNumber: string, date: string): Promise<FlightAwareResponse> {
-  if (!FLIGHTAWARE_API_KEY) {
-    throw new Error('FlightAware API key not configured');
-  }
+function getPreviousDay(dateStr: string): string {
+  const date = new Date(dateStr);
+  date.setDate(date.getDate() - 1);
+  return date.toISOString().split('T')[0];
+}
 
-  // Use date filtering to get the correct flight for the specified date
-  const startDate = date;
-  const endDate = getNextDay(date);
+/**
+ * Fetches flight data from FlightAware API for a single flight number
+ */
+async function fetchFlightData(flightNumber: string, startDate: string, endDate: string): Promise<FlightAwareResponse> {
   const url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}?start=${startDate}&end=${endDate}`;
   
   console.log(`Fetching from FlightAware: ${url}`);
@@ -61,14 +172,64 @@ async function fetchFlightInfo(flightNumber: string, date: string): Promise<Flig
     throw new Error(`FlightAware API error: ${response.status} ${response.statusText} - ${errorText}`);
   }
 
-  const data = await response.json() as FlightAwareResponse;
+  return await response.json() as FlightAwareResponse;
+}
+
+/**
+ * Fetches flight information from FlightAware AeroAPI v4 with date filtering
+ * to get the correct flight for the specified date.
+ * Tries ICAO code if IATA code returns no results.
+ */
+async function fetchFlightInfo(flightNumber: string, date: string): Promise<FlightAwareResponse> {
+  if (!FLIGHTAWARE_API_KEY) {
+    throw new Error('FlightAware API key not configured');
+  }
+
+  // Expand date range to handle timezone differences
+  // A flight departing "Jan 28" in local time might be "Jan 27" in UTC
+  const prevDay = getPreviousDay(date);
+  const startDate = prevDay;
+  const endDate = getNextDay(date);
+  
+  // First try with the provided flight number
+  console.log(`Fetching flight info for ${flightNumber} on ${date} (query range: ${startDate} to ${endDate})`);
+  let data = await fetchFlightData(flightNumber, startDate, endDate);
+  
+  // If no flights found and we have an IATA code, try ICAO
+  if ((!data.flights || data.flights.length === 0)) {
+    const icaoFlightNumber = convertToIcaoFlightNumber(flightNumber);
+    if (icaoFlightNumber) {
+      console.log(`No flights found for ${flightNumber}, trying ICAO code: ${icaoFlightNumber}`);
+      data = await fetchFlightData(icaoFlightNumber, startDate, endDate);
+    }
+  }
+  
   return data;
+}
+
+/**
+ * Formats a UTC date to local date in the given timezone
+ */
+function formatDateInTimezone(utcDateStr: string, timezone: string): string {
+  try {
+    const date = new Date(utcDateStr);
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    return formatter.format(date);
+  } catch {
+    // Fallback to UTC date
+    return utcDateStr.split('T')[0];
+  }
 }
 
 /**
  * Extracts departure time and fa_flight_id from FlightAware response
  * @param flightData - FlightAware API response
- * @param targetDate - The date we're looking for (YYYY-MM-DD)
+ * @param targetDate - The date we're looking for (YYYY-MM-DD) in local departure timezone
  * @returns FlightInfo with departure time and fa_flight_id, or null if not found
  */
 function extractFlightInfo(flightData: FlightAwareResponse, targetDate: string): FlightInfo | null {
@@ -78,15 +239,21 @@ function extractFlightInfo(flightData: FlightAwareResponse, targetDate: string):
     return null;
   }
 
-  // Find the flight matching the target date
-  // scheduled_out format: "2026-01-21T21:00:00Z"
+  // Find the flight matching the target date (in local departure timezone)
   for (const flight of flightData.flights) {
     const scheduledOut = flight.scheduled_out || flight.estimated_out || flight.actual_out;
     if (!scheduledOut) continue;
 
-    const flightDate = scheduledOut.split('T')[0]; // Extract YYYY-MM-DD
+    // Get departure timezone from origin
+    const departureTimezone = flight.origin?.timezone || 'UTC';
     
-    if (flightDate === targetDate) {
+    // Format the departure date in local timezone
+    const localDepartureDate = formatDateInTimezone(scheduledOut, departureTimezone);
+    
+    // Also check UTC date for backwards compatibility
+    const utcDate = scheduledOut.split('T')[0];
+    
+    if (localDepartureDate === targetDate || utcDate === targetDate) {
       const departureTime = new Date(flight.actual_out || flight.estimated_out || flight.scheduled_out);
       const faFlightId = flight.fa_flight_id;
 
@@ -95,7 +262,7 @@ function extractFlightInfo(flightData: FlightAwareResponse, targetDate: string):
         return null;
       }
 
-      console.log(`Found flight for ${targetDate}: fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}`);
+      console.log(`Found flight for ${targetDate} (local: ${localDepartureDate}, UTC: ${utcDate}): fa_flight_id=${faFlightId}, departure=${departureTime.toISOString()}`);
       return { departureTime, faFlightId };
     }
   }

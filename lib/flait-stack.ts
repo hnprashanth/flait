@@ -328,5 +328,46 @@ export class FlaitStack extends cdk.Stack {
       value: `${api.url}whatsapp`,
       description: 'WhatsApp webhook URL for Twilio',
     });
+
+    // --- Pending Subscription Activator ---
+    // Daily job to activate pending subscriptions when flights come within 2 days
+
+    const pendingSubscriptionActivator = new NodejsFunction(this, 'PendingSubscriptionActivator', {
+      functionName: 'pending-subscription-activator',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.join(__dirname, '../lambda/pending-subscription-activator/index.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(300), // 5 minutes - may need to process many subscriptions
+      environment: {
+        APP_TABLE_NAME: appTable.tableName,
+        FLIGHTAWARE_API_KEY: process.env.FLIGHTAWARE_API_KEY || '',
+        FLIGHT_TRACKER_FUNCTION_NAME: 'flight-tracker',
+        SCHEDULE_TRACKER_FUNCTION_NAME: 'schedule-flight-tracker',
+      },
+      bundling: {
+        minify: true,
+      },
+    });
+
+    // Grant permissions
+    appTable.grantReadWriteData(pendingSubscriptionActivator);
+    pendingSubscriptionActivator.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['lambda:InvokeFunction'],
+        resources: [
+          `arn:aws:lambda:${this.region}:${this.account}:function:flight-tracker`,
+          `arn:aws:lambda:${this.region}:${this.account}:function:schedule-flight-tracker`,
+        ],
+      })
+    );
+
+    // EventBridge rule to run daily at 6 AM UTC
+    new events.Rule(this, 'PendingSubscriptionActivatorRule', {
+      ruleName: 'pending-subscription-activator-daily',
+      description: 'Runs daily to activate pending flight subscriptions',
+      schedule: events.Schedule.cron({ minute: '0', hour: '6' }),
+      targets: [new targets.LambdaFunction(pendingSubscriptionActivator)],
+    });
   }
 }

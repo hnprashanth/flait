@@ -15,11 +15,130 @@ const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 const SCHEDULE_TRACKER_FUNCTION_NAME = process.env.SCHEDULE_TRACKER_FUNCTION_NAME;
 
 /**
+ * Mapping of 2-letter IATA airline codes to 3-letter ICAO codes
+ * FlightAware AeroAPI uses ICAO codes for flight lookups
+ */
+const IATA_TO_ICAO: Record<string, string> = {
+  // Major international airlines
+  'AA': 'AAL', // American Airlines
+  'UA': 'UAL', // United Airlines
+  'DL': 'DAL', // Delta Air Lines
+  'WN': 'SWA', // Southwest Airlines
+  'BA': 'BAW', // British Airways
+  'AF': 'AFR', // Air France
+  'KL': 'KLM', // KLM Royal Dutch Airlines
+  'LH': 'DLH', // Lufthansa
+  'JL': 'JAL', // Japan Airlines
+  'NH': 'ANA', // All Nippon Airways
+  'QF': 'QFA', // Qantas
+  'SQ': 'SIA', // Singapore Airlines
+  'CX': 'CPA', // Cathay Pacific
+  'EK': 'UAE', // Emirates
+  'EY': 'ETD', // Etihad Airways
+  'QR': 'QTR', // Qatar Airways
+  'TK': 'THY', // Turkish Airlines
+  'SK': 'SAS', // Scandinavian Airlines
+  'TP': 'TAP', // TAP Air Portugal
+  'IB': 'IBE', // Iberia
+  'AC': 'ACA', // Air Canada
+  'NZ': 'ANZ', // Air New Zealand
+  'VS': 'VIR', // Virgin Atlantic
+  'U2': 'EZY', // easyJet
+  'FR': 'RYR', // Ryanair
+  // Asian carriers
+  'AI': 'AIC', // Air India
+  'CI': 'CAL', // China Airlines
+  'BR': 'EVA', // EVA Air
+  'OZ': 'AAR', // Asiana Airlines
+  'KE': 'KAL', // Korean Air
+  'MH': 'MAS', // Malaysia Airlines
+  'GA': 'GIA', // Garuda Indonesia
+  'TG': 'THA', // Thai Airways
+  'VN': 'HVN', // Vietnam Airlines
+  'PR': 'PAL', // Philippine Airlines
+  // Indian carriers
+  '6E': 'IGO', // IndiGo
+  'UK': 'VTI', // Vistara
+  'SG': 'SEJ', // SpiceJet
+  'IX': 'AXB', // Air India Express
+  'G8': 'GOW', // Go First
+  'I5': 'IAD', // AirAsia India
+  'QP': 'AKJ', // Akasa Air
+  // Middle Eastern
+  'WY': 'OMA', // Oman Air
+  'GF': 'GFA', // Gulf Air
+  'SV': 'SVA', // Saudia
+  // European
+  'AZ': 'ITY', // ITA Airways
+  'OS': 'AUA', // Austrian Airlines
+  'LX': 'SWR', // Swiss International
+  'SN': 'BEL', // Brussels Airlines
+};
+
+/**
+ * Extracts airline code and flight number from a flight number string
+ */
+function extractAirlineCode(flightNumber: string): { airlineCode: string | null; flightNum: string | null } {
+  const upper = flightNumber.toUpperCase().trim();
+  
+  // Try 2-letter IATA code first (e.g., "JL754" or "IX-2712")
+  const iataMatch = upper.match(/^([A-Z]{2})[- ]?(\d+)$/);
+  if (iataMatch) {
+    return { airlineCode: iataMatch[1], flightNum: iataMatch[2] };
+  }
+  
+  // Try 3-letter ICAO code (e.g., "JAL754" or "JAL-754")
+  const icaoMatch = upper.match(/^([A-Z]{3})[- ]?(\d+)$/);
+  if (icaoMatch) {
+    return { airlineCode: icaoMatch[1], flightNum: icaoMatch[2] };
+  }
+  
+  // Try alphanumeric 2-char code (e.g., "6E123")
+  const alphaNumMatch = upper.match(/^([A-Z0-9]{2})[- ]?(\d+)$/);
+  if (alphaNumMatch) {
+    return { airlineCode: alphaNumMatch[1], flightNum: alphaNumMatch[2] };
+  }
+  
+  return { airlineCode: null, flightNum: null };
+}
+
+/**
+ * Converts a flight number with IATA airline code to ICAO format
+ * Returns null if already ICAO or unknown airline
+ */
+function convertToIcaoFlightNumber(flightNumber: string): string | null {
+  const { airlineCode, flightNum } = extractAirlineCode(flightNumber);
+  
+  if (!airlineCode || !flightNum) {
+    return null;
+  }
+  
+  // If it's a 2-character code, try to convert to ICAO
+  if (airlineCode.length === 2) {
+    const icaoCode = IATA_TO_ICAO[airlineCode];
+    if (icaoCode) {
+      return `${icaoCode}${flightNum}`;
+    }
+  }
+  
+  return null;
+}
+
+/**
  * Returns the next day in YYYY-MM-DD format
  */
 function getNextDay(dateStr: string): string {
   const date = new Date(dateStr);
   date.setDate(date.getDate() + 1);
+  return date.toISOString().split('T')[0];
+}
+
+/**
+ * Returns the previous day in YYYY-MM-DD format
+ */
+function getPreviousDay(dateStr: string): string {
+  const date = new Date(dateStr);
+  date.setDate(date.getDate() - 1);
   return date.toISOString().split('T')[0];
 }
 
@@ -76,34 +195,9 @@ const INBOUND_DELAY_ALERT_THRESHOLD_MINUTES = 30;
 const INBOUND_DELAY_CHANGE_THRESHOLD_MINUTES = 15;
 
 /**
- * Fetches flight information from FlightAware AeroAPI v4
- * Documentation: https://flightaware.com/aeroapi/
- * 
- * @param flightNumber - Flight ident (e.g., "KL880")
- * @param date - Flight date in YYYY-MM-DD format
- * @param faFlightId - Optional FlightAware unique flight ID for precise tracking
+ * Makes a single FlightAware API request
  */
-async function fetchFlightInfo(flightNumber: string, date: string, faFlightId?: string): Promise<FlightAwareResponse> {
-  if (!FLIGHTAWARE_API_KEY) {
-    throw new Error('FlightAware API key not configured');
-  }
-
-  let url: string;
-
-  if (faFlightId) {
-    // Use precise fa_flight_id query for exact flight tracking
-    // This ensures we always get the same flight instance
-    url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(faFlightId)}`;
-    console.log(`Fetching flight by fa_flight_id: ${faFlightId}`);
-  } else {
-    // Fall back to date-filtered ident query
-    // Add date range to filter for the specific flight date
-    const startDate = date; // e.g., "2026-01-21"
-    const endDate = getNextDay(date); // e.g., "2026-01-22"
-    url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}?start=${startDate}&end=${endDate}`;
-    console.log(`Fetching flight by ident with date filter: ${flightNumber} from ${startDate} to ${endDate}`);
-  }
-  
+async function fetchFlightData(url: string): Promise<FlightAwareResponse> {
   const response = await fetch(url, {
     method: 'GET',
     headers: {
@@ -117,11 +211,52 @@ async function fetchFlightInfo(flightNumber: string, date: string, faFlightId?: 
     throw new Error(`FlightAware API error: ${response.status} ${response.statusText} - ${errorText}`);
   }
 
-  const data = await response.json() as FlightAwareResponse;
+  return await response.json() as FlightAwareResponse;
+}
+
+/**
+ * Fetches flight information from FlightAware AeroAPI v4
+ * Documentation: https://flightaware.com/aeroapi/
+ * Tries ICAO code if IATA code returns no results.
+ * 
+ * @param flightNumber - Flight ident (e.g., "KL880" or "JL754")
+ * @param date - Flight date in YYYY-MM-DD format
+ * @param faFlightId - Optional FlightAware unique flight ID for precise tracking
+ */
+async function fetchFlightInfo(flightNumber: string, date: string, faFlightId?: string): Promise<FlightAwareResponse> {
+  if (!FLIGHTAWARE_API_KEY) {
+    throw new Error('FlightAware API key not configured');
+  }
+
+  // If we have fa_flight_id, use it directly (most precise)
+  if (faFlightId) {
+    const url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(faFlightId)}`;
+    console.log(`Fetching flight by fa_flight_id: ${faFlightId}`);
+    return await fetchFlightData(url);
+  }
+
+  // Fall back to date-filtered ident query
+  // Expand date range to handle timezone differences
+  // A flight departing "Jan 28" in local time might be "Jan 27" in UTC
+  const startDate = getPreviousDay(date);
+  const endDate = getNextDay(date);
   
-  // AeroAPI v4 returns data in a specific format
-  // Adjust this based on actual API response structure
-  // The response structure will vary based on the endpoint used
+  // First try with the provided flight number
+  let url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(flightNumber)}?start=${startDate}&end=${endDate}`;
+  console.log(`Fetching flight by ident with date filter: ${flightNumber} for ${date} (query range: ${startDate} to ${endDate})`);
+  
+  let data = await fetchFlightData(url);
+  
+  // If no flights found and we have an IATA code, try ICAO
+  if ((!data.flights || data.flights.length === 0)) {
+    const icaoFlightNumber = convertToIcaoFlightNumber(flightNumber);
+    if (icaoFlightNumber) {
+      console.log(`No flights found for ${flightNumber}, trying ICAO code: ${icaoFlightNumber}`);
+      url = `https://aeroapi.flightaware.com/aeroapi/flights/${encodeURIComponent(icaoFlightNumber)}?start=${startDate}&end=${endDate}`;
+      data = await fetchFlightData(url);
+    }
+  }
+  
   return data;
 }
 

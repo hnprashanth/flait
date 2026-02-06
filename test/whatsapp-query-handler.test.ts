@@ -1184,3 +1184,149 @@ describe('convertToIcaoFlightNumber', () => {
     expect(convertToIcaoFlightNumber('jl754')).toBe('JAL754');
   });
 });
+
+describe('WhatsApp Handler - Airline Name Lookup', () => {
+  const { getAirlineName } = require('../lambda/whatsapp-query-handler/index')._testExports;
+
+  test('returns airline name for known ICAO code', () => {
+    expect(getAirlineName('AAL')).toBe('American Airlines');
+    expect(getAirlineName('JAL')).toBe('Japan Airlines');
+    expect(getAirlineName('KLM')).toBe('KLM Royal Dutch Airlines');
+    expect(getAirlineName('UAE')).toBe('Emirates');
+  });
+
+  test('returns ICAO code for unknown airline', () => {
+    expect(getAirlineName('XYZ')).toBe('XYZ');
+    expect(getAirlineName('ABC')).toBe('ABC');
+  });
+});
+
+describe('WhatsApp Handler - Flight Number Parsing', () => {
+  const { extractAirlineCode, convertToIcaoFlightNumber } = require('../lambda/whatsapp-query-handler/index')._testExports;
+
+  test('extracts code and number from standard format', () => {
+    expect(extractAirlineCode('JL754')).toEqual({ airlineCode: 'JL', flightNum: '754' });
+    expect(extractAirlineCode('JAL754')).toEqual({ airlineCode: 'JAL', flightNum: '754' });
+  });
+
+  test('extracts code and number from hyphenated format', () => {
+    expect(extractAirlineCode('IX-2712')).toEqual({ airlineCode: 'IX', flightNum: '2712' });
+    expect(extractAirlineCode('JAL-754')).toEqual({ airlineCode: 'JAL', flightNum: '754' });
+    expect(extractAirlineCode('6E-123')).toEqual({ airlineCode: '6E', flightNum: '123' });
+  });
+
+  test('extracts code and number with spaces', () => {
+    expect(extractAirlineCode('IX 2712')).toEqual({ airlineCode: 'IX', flightNum: '2712' });
+    expect(extractAirlineCode('JAL 754')).toEqual({ airlineCode: 'JAL', flightNum: '754' });
+  });
+
+  test('converts hyphenated IATA to ICAO', () => {
+    expect(convertToIcaoFlightNumber('IX-2712')).toBe('AXB2712');
+    expect(convertToIcaoFlightNumber('JL-754')).toBe('JAL754');
+  });
+});
+
+describe('WhatsApp Handler - Subscription Response Formatting', () => {
+  const { formatSubscriptionResponse } = require('../lambda/whatsapp-query-handler/index')._testExports;
+
+  test('includes codeshare info in response', () => {
+    const results = [{
+      success: true,
+      flight_number: 'JL7012',
+      date: '2026-01-26',
+      message: 'Subscribed',
+      flight_info: {
+        valid: true,
+        flight_number: 'JL7012',
+        date: '2026-01-26',
+        departure_airport: 'NRT',
+        departure_city: 'Tokyo',
+        arrival_airport: 'DFW',
+        arrival_city: 'Dallas',
+        departure_time: '2026-01-26T08:30:00Z',
+        departure_timezone: 'Asia/Tokyo',
+        is_codeshare: true,
+        operating_flight: 'AA60',
+        operating_airline: 'American Airlines',
+      },
+    }];
+
+    const response = formatSubscriptionResponse(results);
+
+    expect(response).toContain('Now tracking JL7012');
+    expect(response).toContain('American Airlines');
+    expect(response).toContain('AA60');
+  });
+
+  test('formats single flight subscription without codeshare', () => {
+    const results = [{
+      success: true,
+      flight_number: 'KL880',
+      date: '2026-01-23',
+      message: 'Subscribed',
+      flight_info: {
+        valid: true,
+        flight_number: 'KL880',
+        date: '2026-01-23',
+        departure_airport: 'BLR',
+        departure_city: 'Bengaluru',
+        arrival_airport: 'AMS',
+        arrival_city: 'Amsterdam',
+        departure_time: '2026-01-23T21:00:00Z',
+        departure_timezone: 'Asia/Kolkata',
+      },
+    }];
+
+    const response = formatSubscriptionResponse(results);
+
+    expect(response).toContain('Now tracking KL880');
+    expect(response).toContain('Bengaluru');
+    expect(response).toContain('Amsterdam');
+    expect(response).not.toContain('operated by');
+  });
+
+  test('handles multiple flights with codeshare', () => {
+    const results = [
+      {
+        success: true,
+        flight_number: 'KL880',
+        date: '2026-01-23',
+        message: 'Subscribed',
+        flight_info: {
+          valid: true,
+          flight_number: 'KL880',
+          date: '2026-01-23',
+          departure_airport: 'BLR',
+          arrival_airport: 'AMS',
+          departure_time: '2026-01-23T21:00:00Z',
+          departure_timezone: 'Asia/Kolkata',
+        },
+      },
+      {
+        success: true,
+        flight_number: 'JL7012',
+        date: '2026-01-24',
+        message: 'Subscribed',
+        flight_info: {
+          valid: true,
+          flight_number: 'JL7012',
+          date: '2026-01-24',
+          departure_airport: 'NRT',
+          arrival_airport: 'DFW',
+          departure_time: '2026-01-24T08:30:00Z',
+          departure_timezone: 'Asia/Tokyo',
+          is_codeshare: true,
+          operating_flight: 'AA60',
+          operating_airline: 'American Airlines',
+        },
+      },
+    ];
+
+    const response = formatSubscriptionResponse(results);
+
+    expect(response).toContain('Now tracking 2 flights');
+    expect(response).toContain('KL880');
+    expect(response).toContain('JL7012');
+    expect(response).toContain('American Airlines');
+  });
+});

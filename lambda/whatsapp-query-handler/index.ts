@@ -154,6 +154,12 @@ interface FlightValidationResult {
   departure_time?: string;
   departure_timezone?: string;
   error?: string;
+  // For codeshare flights (detected from flights API)
+  is_codeshare?: boolean;
+  operating_flight?: string;      // e.g., "AA60" when user searched "JL7012"
+  operating_airline?: string;     // e.g., "American Airlines"
+  // For far-future flights (>2 days) - no fa_flight_id available yet
+  pending?: boolean;
 }
 
 /** Subscription result */
@@ -427,6 +433,9 @@ const IATA_TO_ICAO: Record<string, string> = {
   '6E': 'IGO',   // IndiGo
   'SG': 'SEJ',   // SpiceJet
   'UK': 'VTI',   // Vistara
+  'IX': 'AXB',   // Air India Express
+  'QP': 'AKJ',   // Akasa Air
+  'I5': 'IAD',   // AirAsia India
   'MH': 'MAS',   // Malaysia Airlines
   'TG': 'THA',   // Thai Airways
   'GA': 'GIA',   // Garuda Indonesia
@@ -479,19 +488,19 @@ const IATA_TO_ICAO: Record<string, string> = {
 
 /**
  * Extracts the airline code prefix from a flight number.
- * Handles both 2-letter IATA codes (e.g., "JL754") and 3-letter ICAO codes (e.g., "JAL754")
+ * Handles both 2-letter IATA codes (e.g., "JL754", "IX-2712") and 3-letter ICAO codes (e.g., "JAL754")
  */
 function extractAirlineCode(flightNumber: string): { airlineCode: string; flightNum: string } {
   const upper = flightNumber.toUpperCase().trim();
   
-  // Try 3-letter ICAO code first (e.g., "JAL754")
-  const icaoMatch = upper.match(/^([A-Z]{3})(\d+)$/);
+  // Try 3-letter ICAO code first (e.g., "JAL754" or "JAL-754")
+  const icaoMatch = upper.match(/^([A-Z]{3})[- ]?(\d+)$/);
   if (icaoMatch) {
     return { airlineCode: icaoMatch[1], flightNum: icaoMatch[2] };
   }
   
-  // Try 2-letter IATA code (e.g., "JL754")
-  const iataMatch = upper.match(/^([A-Z0-9]{2})(\d+)$/);
+  // Try 2-letter IATA code (e.g., "JL754" or "IX-2712")
+  const iataMatch = upper.match(/^([A-Z0-9]{2})[- ]?(\d+)$/);
   if (iataMatch) {
     return { airlineCode: iataMatch[1], flightNum: iataMatch[2] };
   }
@@ -571,27 +580,154 @@ async function fetchFlightsFromApi(flightNumber: string): Promise<any[]> {
 }
 
 /**
+ * Scheduled flight info from FlightAware schedules API
+ */
+interface ScheduledFlightInfo {
+  ident: string;
+  ident_iata: string;
+  actual_ident?: string | null;      // Operating flight (for codeshares)
+  actual_ident_iata?: string | null;
+  aircraft_type?: string;
+  scheduled_out: string;
+  scheduled_in: string;
+  origin_iata: string;
+  destination_iata: string;
+  origin_icao: string;
+  destination_icao: string;
+}
+
+/**
+ * Fetches flight schedule from FlightAware's schedules API.
+ * This endpoint works for flights further than 2 days in the future.
+ * @param flightNumber - Flight number (e.g., "JL754" or "JAL754")
+ * @param date - Date in YYYY-MM-DD format
+ */
+async function fetchScheduledFlight(
+  flightNumber: string, 
+  date: string
+): Promise<ScheduledFlightInfo | null> {
+  try {
+    // Extract airline code and flight number
+    const { airlineCode, flightNum } = extractAirlineCode(flightNumber);
+    if (!airlineCode || !flightNum) {
+      return null;
+    }
+    
+    // Try ICAO code first, then IATA
+    let airline = airlineCode;
+    if (airlineCode.length === 2) {
+      // Convert IATA to ICAO if we have a mapping
+      airline = IATA_TO_ICAO[airlineCode] || airlineCode;
+    }
+    
+    // Calculate date range (date-1 to date+1) to handle timezone differences
+    // A flight departing "Jan 28" in local time might be "Jan 27" in UTC
+    const startDateObj = new Date(date);
+    startDateObj.setDate(startDateObj.getDate() - 1);
+    const startDate = startDateObj.toISOString().split('T')[0];
+    
+    const endDateObj = new Date(date);
+    endDateObj.setDate(endDateObj.getDate() + 1);
+    const endDate = endDateObj.toISOString().split('T')[0];
+    
+    const url = `https://aeroapi.flightaware.com/aeroapi/schedules/${startDate}/${endDate}?airline=${airline}&flight_number=${flightNum}`;
+    console.log(`Fetching schedule for ${flightNumber} on ${date}: ${url}`);
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'x-apikey': FLIGHTAWARE_API_KEY,
+        'Content-Type': 'application/json',
+      },
+    });
+    
+    if (!response.ok) {
+      console.error(`FlightAware schedules API error: ${response.status} ${response.statusText}`);
+      return null;
+    }
+    
+    const data = await response.json() as { scheduled?: ScheduledFlightInfo[] };
+    
+    if (!data.scheduled || data.scheduled.length === 0) {
+      // Try with IATA code if ICAO didn't work
+      if (airline !== airlineCode) {
+        console.log(`No schedule found with ICAO ${airline}, trying IATA ${airlineCode}`);
+        const iataUrl = `https://aeroapi.flightaware.com/aeroapi/schedules/${startDate}/${endDate}?airline=${airlineCode}&flight_number=${flightNum}`;
+        const iataResponse = await fetch(iataUrl, {
+          method: 'GET',
+          headers: {
+            'x-apikey': FLIGHTAWARE_API_KEY,
+            'Content-Type': 'application/json',
+          },
+        });
+        
+        if (iataResponse.ok) {
+          const iataData = await iataResponse.json() as { scheduled?: ScheduledFlightInfo[] };
+          if (iataData.scheduled && iataData.scheduled.length > 0) {
+            return iataData.scheduled[0];
+          }
+        }
+      }
+      return null;
+    }
+    
+    // Return the first matching schedule
+    return data.scheduled[0];
+  } catch (error) {
+    console.error('Error fetching flight schedule:', error);
+    return null;
+  }
+}
+
+/**
+ * Gets airline name from ICAO code (basic mapping for common airlines)
+ */
+function getAirlineName(icaoCode: string): string {
+  const airlineNames: Record<string, string> = {
+    'AAL': 'American Airlines',
+    'UAL': 'United Airlines',
+    'DAL': 'Delta Air Lines',
+    'SWA': 'Southwest Airlines',
+    'BAW': 'British Airways',
+    'AFR': 'Air France',
+    'KLM': 'KLM Royal Dutch Airlines',
+    'DLH': 'Lufthansa',
+    'JAL': 'Japan Airlines',
+    'ANA': 'All Nippon Airways',
+    'QFA': 'Qantas',
+    'SIA': 'Singapore Airlines',
+    'CPA': 'Cathay Pacific',
+    'UAE': 'Emirates',
+    'ETD': 'Etihad Airways',
+    'QTR': 'Qatar Airways',
+    'THY': 'Turkish Airlines',
+    'SAS': 'Scandinavian Airlines',
+    'TAP': 'TAP Air Portugal',
+    'IBE': 'Iberia',
+    'ACA': 'Air Canada',
+    'ANZ': 'Air New Zealand',
+    'VIR': 'Virgin Atlantic',
+    'EZY': 'easyJet',
+    'RYR': 'Ryanair',
+  };
+  return airlineNames[icaoCode] || icaoCode;
+}
+
+/**
  * Validates a flight subscription request and returns flight details
  */
 async function validateFlightSubscription(
   request: SubscriptionRequest
 ): Promise<FlightValidationResult> {
   try {
-    // Fetch upcoming flights
+    // Fetch upcoming flights (works for flights within ~2 days)
     const flights = await fetchUpcomingFlights(request.flight_number);
     
-    if (!flights || flights.length === 0) {
-      return {
-        valid: false,
-        flight_number: request.flight_number,
-        date: '',
-        error: `Couldn't find any upcoming flights for ${request.flight_number}`,
-      };
+    // We need to resolve the date first - use UTC as fallback if no flights found
+    let departureTimezone = 'UTC';
+    if (flights && flights.length > 0) {
+      departureTimezone = flights[0].origin?.timezone || 'UTC';
     }
-    
-    // Get departure timezone from first flight to resolve the date
-    const firstFlight = flights[0];
-    const departureTimezone = firstFlight.origin?.timezone || 'UTC';
     
     // Resolve the date text to an actual date
     const resolvedDate = resolveDateInTimezone(request.date_text, departureTimezone);
@@ -605,46 +741,82 @@ async function validateFlightSubscription(
       };
     }
     
-    // Find the flight on the resolved date
-    const matchingFlight = flights.find((f: any) => {
-      const scheduledDeparture = f.scheduled_out || f.scheduled_off;
-      if (!scheduledDeparture) return false;
-      
-      // Format the departure date in the departure timezone
-      const depDate = new Date(scheduledDeparture);
-      const formatter = new Intl.DateTimeFormat('en-CA', {
-        timeZone: departureTimezone,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
+    // If we have flights, try to find one on the resolved date
+    if (flights && flights.length > 0) {
+      const matchingFlight = flights.find((f: any) => {
+        const scheduledDeparture = f.scheduled_out || f.scheduled_off;
+        if (!scheduledDeparture) return false;
+        
+        // Format the departure date in the departure timezone
+        const depDate = new Date(scheduledDeparture);
+        const formatter = new Intl.DateTimeFormat('en-CA', {
+          timeZone: departureTimezone,
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        });
+        const flightDate = formatter.format(depDate);
+        return flightDate === resolvedDate;
       });
-      const flightDate = formatter.format(depDate);
-      return flightDate === resolvedDate;
-    });
+      
+      if (matchingFlight) {
+        // Found a flight in the flights API - has fa_flight_id
+        const depTime = matchingFlight.scheduled_out || matchingFlight.scheduled_off;
+        
+        return {
+          valid: true,
+          flight_number: request.flight_number,
+          date: resolvedDate,
+          fa_flight_id: matchingFlight.fa_flight_id,
+          departure_airport: matchingFlight.origin?.code_iata || matchingFlight.origin?.code,
+          departure_city: matchingFlight.origin?.city,
+          arrival_airport: matchingFlight.destination?.code_iata || matchingFlight.destination?.code,
+          arrival_city: matchingFlight.destination?.city,
+          departure_time: depTime,
+          departure_timezone: departureTimezone,
+        };
+      }
+    }
     
-    if (!matchingFlight) {
+    // No match in flights API - try schedules API to check if flight exists but is too far out
+    console.log(`No flight found in flights API for ${request.flight_number} on ${resolvedDate}, checking schedules API`);
+    
+    const schedule = await fetchScheduledFlight(request.flight_number, resolvedDate);
+    
+    if (schedule) {
+      // Flight exists but is more than 2 days out - allow as pending subscription
+      console.log(`Found schedule for ${request.flight_number} on ${resolvedDate}, creating pending subscription`);
+
+      // Check for codeshare
+      let isCodeshare = false;
+      let operatingFlight: string | undefined;
+      let operatingAirline: string | undefined;
+      if (schedule.actual_ident && schedule.actual_ident !== schedule.ident) {
+        isCodeshare = true;
+        operatingFlight = schedule.actual_ident_iata || schedule.actual_ident;
+        operatingAirline = getAirlineName(schedule.actual_ident.substring(0, 3));
+      }
+
       return {
-        valid: false,
+        valid: true,
         flight_number: request.flight_number,
         date: resolvedDate,
-        error: `${request.flight_number} doesn't appear to operate on ${resolvedDate}. Please check the date.`,
+        pending: true,  // No fa_flight_id yet - will be resolved when flight comes within 2 days
+        departure_airport: schedule.origin_iata,
+        arrival_airport: schedule.destination_iata,
+        departure_time: schedule.scheduled_out,
+        is_codeshare: isCodeshare,
+        operating_flight: operatingFlight,
+        operating_airline: operatingAirline,
       };
     }
     
-    // Extract flight info
-    const depTime = matchingFlight.scheduled_out || matchingFlight.scheduled_off;
-    
+    // Neither API found the flight
     return {
-      valid: true,
+      valid: false,
       flight_number: request.flight_number,
       date: resolvedDate,
-      fa_flight_id: matchingFlight.fa_flight_id,
-      departure_airport: matchingFlight.origin?.code_iata || matchingFlight.origin?.code,
-      departure_city: matchingFlight.origin?.city,
-      arrival_airport: matchingFlight.destination?.code_iata || matchingFlight.destination?.code,
-      arrival_city: matchingFlight.destination?.city,
-      departure_time: depTime,
-      departure_timezone: departureTimezone,
+      error: `${request.flight_number} doesn't appear to operate on ${resolvedDate}. Please check the flight number and date.`,
     };
   } catch (error) {
     console.error('Error validating flight:', error);
@@ -712,7 +884,8 @@ async function createSubscription(
 ): Promise<boolean> {
   try {
     const now = new Date().toISOString();
-    
+    const isPending = flightInfo.pending === true;
+
     // 1. Save the subscription
     await docClient.send(new PutCommand({
       TableName: APP_TABLE_NAME,
@@ -724,40 +897,46 @@ async function createSubscription(
         flight_number: flightInfo.flight_number,
         date: flightInfo.date,
         fa_flight_id: flightInfo.fa_flight_id,
-        status: 'ACTIVE',
+        status: isPending ? 'PENDING_ACTIVATION' : 'ACTIVE',
+        departure_airport: flightInfo.departure_airport,
+        arrival_airport: flightInfo.arrival_airport,
+        departure_time: flightInfo.departure_time,
+        is_codeshare: flightInfo.is_codeshare || false,
+        operating_flight: flightInfo.operating_flight || null,
         created_at: now,
         updated_at: now,
       },
     }));
-    
-    console.log(`Created subscription for ${phone}: ${flightInfo.flight_number} on ${flightInfo.date}`);
-    
-    // 2. Provision flight tracking (async - don't block the response)
-    // Flight data was already fetched during validation, but we need to ensure
-    // it's stored and schedules are created
-    const trackingPayload = {
-      flight_number: flightInfo.flight_number,
-      date: flightInfo.date,
-    };
-    
-    // Invoke flight-tracker to ensure data is stored (may already exist from validation)
-    if (FLIGHT_TRACKER_FUNCTION_NAME) {
-      try {
-        await invokeLambdaAsync(FLIGHT_TRACKER_FUNCTION_NAME, trackingPayload);
-      } catch (error) {
-        console.error('Failed to invoke flight-tracker (non-fatal):', error);
+
+    console.log(`Created ${isPending ? 'pending ' : ''}subscription for ${phone}: ${flightInfo.flight_number} on ${flightInfo.date}`);
+
+    // 2. Provision flight tracking (only for non-pending subscriptions)
+    // Pending subscriptions will be activated by the daily activator Lambda when the flight comes within 2 days
+    if (!isPending) {
+      const trackingPayload = {
+        flight_number: flightInfo.flight_number,
+        date: flightInfo.date,
+      };
+
+      // Invoke flight-tracker to ensure data is stored
+      if (FLIGHT_TRACKER_FUNCTION_NAME) {
+        try {
+          await invokeLambdaAsync(FLIGHT_TRACKER_FUNCTION_NAME, trackingPayload);
+        } catch (error) {
+          console.error('Failed to invoke flight-tracker (non-fatal):', error);
+        }
+      }
+
+      // Invoke schedule-tracker to create polling schedules
+      if (SCHEDULE_TRACKER_FUNCTION_NAME) {
+        try {
+          await invokeLambdaAsync(SCHEDULE_TRACKER_FUNCTION_NAME, trackingPayload);
+        } catch (error) {
+          console.error('Failed to invoke schedule-tracker (non-fatal):', error);
+        }
       }
     }
-    
-    // Invoke schedule-tracker to create polling schedules
-    if (SCHEDULE_TRACKER_FUNCTION_NAME) {
-      try {
-        await invokeLambdaAsync(SCHEDULE_TRACKER_FUNCTION_NAME, trackingPayload);
-      } catch (error) {
-        console.error('Failed to invoke schedule-tracker (non-fatal):', error);
-      }
-    }
-    
+
     return true;
   } catch (error) {
     console.error('Error creating subscription:', error);
@@ -868,33 +1047,91 @@ function formatDepartureTimeForDisplay(isoTime: string, timezone: string): strin
 }
 
 /**
+ * Formats departure time for display, handling missing timezone for pending subscriptions
+ */
+function formatDepartureInfo(info: FlightValidationResult, date: string): string {
+  if (info.departure_time && info.departure_timezone) {
+    return `${formatDateForDisplay(date)} • Departs ${formatDepartureTimeForDisplay(info.departure_time, info.departure_timezone)}`;
+  }
+  // For pending subscriptions without timezone info
+  return formatDateForDisplay(date);
+}
+
+/**
  * Formats the subscription response message
  */
 function formatSubscriptionResponse(results: SubscriptionResult[]): string {
   const successes = results.filter(r => r.success);
   const failures = results.filter(r => !r.success);
-  
+
+  // Separate pending from active subscriptions
+  const pending = successes.filter(r => r.flight_info?.pending);
+  const active = successes.filter(r => !r.flight_info?.pending);
+
   const lines: string[] = [];
-  
-  if (successes.length > 0) {
-    if (successes.length === 1) {
-      const s = successes[0];
+
+  if (active.length > 0) {
+    if (active.length === 1) {
+      const s = active[0];
       const info = s.flight_info!;
       lines.push(`✅ Now tracking ${s.flight_number}`);
       lines.push('');
       lines.push(`${info.departure_city || info.departure_airport} → ${info.arrival_city || info.arrival_airport}`);
-      lines.push(`${formatDateForDisplay(s.date)} • Departs ${formatDepartureTimeForDisplay(info.departure_time!, info.departure_timezone!)}`);
+      lines.push(formatDepartureInfo(info, s.date));
+
+      // Add codeshare info if applicable
+      if (info.is_codeshare && info.operating_flight) {
+        lines.push('');
+        lines.push(`ℹ️ This flight is operated by ${info.operating_airline || 'another carrier'} as ${info.operating_flight}`);
+      }
     } else {
-      lines.push(`✅ Now tracking ${successes.length} flights!`);
+      lines.push(`✅ Now tracking ${active.length} flights!`);
       lines.push('');
-      successes.forEach((s, i) => {
+      active.forEach((s, i) => {
         const info = s.flight_info!;
         lines.push(`${i + 1}. ${s.flight_number} ${info.departure_airport} → ${info.arrival_airport}`);
-        lines.push(`   ${formatDateForDisplay(s.date)} • Departs ${formatDepartureTimeForDisplay(info.departure_time!, info.departure_timezone!)}`);
+        lines.push(`   ${formatDepartureInfo(info, s.date)}`);
+        if (info.is_codeshare && info.operating_flight) {
+          lines.push(`   Operated by ${info.operating_airline || 'another carrier'} as ${info.operating_flight}`);
+        }
       });
     }
     lines.push('');
     lines.push("I'll send you updates about delays, gate changes, and more.");
+  }
+
+  // Handle pending subscriptions
+  if (pending.length > 0) {
+    if (active.length > 0) {
+      lines.push('');
+    }
+    if (pending.length === 1) {
+      const s = pending[0];
+      const info = s.flight_info!;
+      lines.push(`📅 Subscribed to ${s.flight_number}`);
+      lines.push('');
+      lines.push(`${info.departure_airport} → ${info.arrival_airport}`);
+      lines.push(formatDateForDisplay(s.date));
+      if (info.is_codeshare && info.operating_flight) {
+        lines.push('');
+        lines.push(`ℹ️ This flight is operated by ${info.operating_airline || 'another carrier'} as ${info.operating_flight}`);
+      }
+      lines.push('');
+      lines.push("I'll start tracking and sending updates closer to departure (within 2 days).");
+    } else {
+      lines.push(`📅 Subscribed to ${pending.length} future flights:`);
+      lines.push('');
+      pending.forEach((s, i) => {
+        const info = s.flight_info!;
+        lines.push(`${i + 1}. ${s.flight_number} ${info.departure_airport} → ${info.arrival_airport}`);
+        lines.push(`   ${formatDateForDisplay(s.date)}`);
+        if (info.is_codeshare && info.operating_flight) {
+          lines.push(`   Operated by ${info.operating_airline || 'another carrier'} as ${info.operating_flight}`);
+        }
+      });
+      lines.push('');
+      lines.push("I'll start tracking these and sending updates closer to departure (within 2 days).");
+    }
   }
   
   if (failures.length > 0) {
@@ -1899,4 +2136,6 @@ export const _testExports = {
   IATA_TO_ICAO,
   extractAirlineCode,
   convertToIcaoFlightNumber,
+  // Airline name lookup
+  getAirlineName,
 };
