@@ -853,15 +853,26 @@ async function sendWhatsAppNotification(userId: string, message: string): Promis
 
     let result;
     if (TWILIO_CONTENT_SID) {
-      // Use pre-approved template — works outside the 24h session window
-      result = await twilioClient.messages.create({
-        contentSid: TWILIO_CONTENT_SID,
-        contentVariables: JSON.stringify({ '1': message }),
-        from: TWILIO_FROM_NUMBER,
-        to: to,
-      });
+      try {
+        // Use pre-approved template — works outside the 24h session window
+        // Sanitize: collapse 3+ consecutive newlines to 2 (WhatsApp limit)
+        const sanitized = message.replace(/\n{3,}/g, '\n\n');
+        result = await twilioClient.messages.create({
+          contentSid: TWILIO_CONTENT_SID,
+          contentVariables: JSON.stringify({ '1': sanitized }),
+          from: TWILIO_FROM_NUMBER,
+          to: to,
+        });
+      } catch (templateError) {
+        // Template send failed — fall back to free-form body
+        console.warn(`Template send failed, falling back to body message:`, templateError);
+        result = await twilioClient.messages.create({
+          body: message,
+          from: TWILIO_FROM_NUMBER,
+          to: to,
+        });
+      }
     } else {
-      // Fallback to free-form body (only works within 24h window)
       result = await twilioClient.messages.create({
         body: message,
         from: TWILIO_FROM_NUMBER,
