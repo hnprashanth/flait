@@ -202,6 +202,14 @@ async function buildTripContext(userId: string): Promise<TripContext> {
     if (skParts.length >= 3) {
       const date = skParts[1];
       const flightNumber = skParts.slice(2).join('#'); // Handle flight numbers with #
+
+      // Skip stale subscriptions - only include flights from yesterday onwards
+      const flightDate = new Date(date);
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - 1);
+      cutoff.setHours(0, 0, 0, 0);
+      if (flightDate < cutoff) continue;
+
       const key = `${flightNumber}#${date}`;
 
       const data = await getLatestFlightData(flightNumber, date);
