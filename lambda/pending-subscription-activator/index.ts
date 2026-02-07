@@ -174,7 +174,8 @@ async function invokeLambdaAsync(functionName: string, payload: Record<string, u
 async function activateSubscription(
   subscription: PendingSubscription,
   faFlightId: string,
-  departureTime: string
+  departureTime: string,
+  arrivalTime?: string
 ): Promise<void> {
   const now = new Date().toISOString();
 
@@ -214,10 +215,21 @@ async function activateSubscription(
     }
   }
 
-  // Invoke schedule-tracker
+  // Invoke schedule-tracker with flight details to avoid redundant FlightAware API call
+  // (the API rejects date ranges > 2 days in the future)
   if (SCHEDULE_TRACKER_FUNCTION_NAME) {
     try {
-      await invokeLambdaAsync(SCHEDULE_TRACKER_FUNCTION_NAME, trackingPayload);
+      const schedulePayload: Record<string, unknown> = {
+        flight_number: subscription.flight_number,
+        date: subscription.date,
+        recalculate: true,
+        new_departure_time: departureTime,
+        fa_flight_id: faFlightId,
+      };
+      if (arrivalTime) {
+        schedulePayload.new_arrival_time = arrivalTime;
+      }
+      await invokeLambdaAsync(SCHEDULE_TRACKER_FUNCTION_NAME, schedulePayload);
     } catch (error) {
       console.error('Failed to invoke schedule-tracker:', error);
     }
@@ -294,6 +306,7 @@ export const handler = async (): Promise<{
 
         const faFlightId = matchingFlight.fa_flight_id;
         const departureTime = matchingFlight.scheduled_out || matchingFlight.scheduled_off;
+        const arrivalTime = matchingFlight.scheduled_in || matchingFlight.estimated_in;
 
         if (!faFlightId) {
           result.reason = 'No fa_flight_id available';
@@ -302,7 +315,7 @@ export const handler = async (): Promise<{
         }
 
         // Activate the subscription
-        await activateSubscription(subscription, faFlightId, departureTime);
+        await activateSubscription(subscription, faFlightId, departureTime, arrivalTime);
 
         result.activated = true;
         result.fa_flight_id = faFlightId;

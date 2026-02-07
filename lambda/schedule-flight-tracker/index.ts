@@ -191,8 +191,16 @@ async function fetchFlightInfo(flightNumber: string, date: string): Promise<Flig
   // A flight departing "Jan 28" in local time might be "Jan 27" in UTC
   const prevDay = getPreviousDay(date);
   const startDate = prevDay;
-  const endDate = getNextDay(date);
-  
+  let endDate = getNextDay(date);
+
+  // FlightAware API rejects end dates > 2 days in the future
+  const maxEnd = new Date();
+  maxEnd.setDate(maxEnd.getDate() + 2);
+  const maxEndStr = maxEnd.toISOString().split('T')[0];
+  if (endDate > maxEndStr) {
+    endDate = maxEndStr;
+  }
+
   // First try with the provided flight number
   console.log(`Fetching flight info for ${flightNumber} on ${date} (query range: ${startDate} to ${endDate})`);
   let data = await fetchFlightData(flightNumber, startDate, endDate);
